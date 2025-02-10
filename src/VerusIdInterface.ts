@@ -23,6 +23,11 @@ import {
   OptCCParams,
   OPS,
   EVALS,
+  IdentityUpdateRequest,
+  IdentityUpdateRequestDetails,
+  IdentityID,
+  IdentityUpdateResponse,
+  IdentityUpdateResponseDetails,
 } from "verus-typescript-primitives";
 import { VerusdRpcInterface } from "verusd-rpc-ts-client";
 import {
@@ -331,6 +336,38 @@ class VerusIdInterface {
     return request;
   }
 
+  async signIdentityUpdateRequest(
+    request: IdentityUpdateRequest,
+    primaryAddrWif: string,
+    getIdentityResult?: GetIdentityResponse["result"],
+    currentHeight?: number
+  ): Promise<IdentityUpdateRequest> {
+    request.setSigned();
+
+    let height = currentHeight;
+
+    if (height == null) {
+      height = await this.getCurrentHeight();
+    }
+
+    const sig = await this.signHash(
+      request.signingid.toAddress()!,
+      request.getDetailsHash(height),
+      primaryAddrWif,
+      getIdentityResult,
+      height,
+      request.systemid.toAddress()!
+    );
+
+    request.signature = new VerusIDSignature(
+      { signature: sig },
+      IDENTITY_AUTH_SIG_VDXF_KEY,
+      false
+    );
+
+    return request;
+  }
+
   async createLoginConsentRequest(
     signingId: string,
     challenge: LoginConsentChallenge,
@@ -352,6 +389,35 @@ class VerusIdInterface {
 
     if (primaryAddrWif) {
       return this.signLoginConsentRequest(
+        req,
+        primaryAddrWif,
+        getIdentityResult,
+        currentHeight
+      );
+    } else return req;
+  }
+
+  async createIdentityUpdateRequest(
+    signingId: string,
+    details: IdentityUpdateRequestDetails,
+    primaryAddrWif?: string,
+    getIdentityResult?: GetIdentityResponse["result"],
+    currentHeight?: number,
+    chainIAddr?: string
+  ): Promise<IdentityUpdateRequest> {
+    let chainId: string;
+
+    if (chainIAddr != null) chainId = chainIAddr;
+    else chainId = await this.getChainId();
+
+    const req = new IdentityUpdateRequest({
+      systemid: IdentityID.fromAddress(chainId),
+      signingid: IdentityID.fromAddress(signingId),
+      details,
+    });
+
+    if (primaryAddrWif) {
+      return this.signIdentityUpdateRequest(
         req,
         primaryAddrWif,
         getIdentityResult,
@@ -400,7 +466,47 @@ class VerusIdInterface {
     );
   }
 
-  private async signResponse(
+  async verifyIdentityUpdateRequest(
+    request: IdentityUpdateRequest,
+    getIdentityResult?: GetIdentityResponse["result"],
+    chainIAddr?: string,
+    sigBlockTime?: number
+  ): Promise<boolean> {
+    const sigInfo = await this.getSignatureInfo(
+      request.signingid.toAddress()!,
+      request.signature!.signature,
+      chainIAddr
+    );
+
+    let blocktime;
+
+    if (sigBlockTime) blocktime = sigBlockTime;
+    else {
+      const _blockres = await this.interface.getBlock(sigInfo.height.toString());
+      if (_blockres.error) throw new Error(_blockres.error.message);
+
+      blocktime = (_blockres.result as BlockInfo).time;
+    }
+
+    if (
+      BigNumber(blocktime)
+        .minus(request.details.createdat!.toString())
+        .abs()
+        .isGreaterThan(LOGIN_CONSENT_SIG_TIME_DIFF_THRESHOLD)
+    ) {
+      return false
+    }
+
+    return this.verifyHash(
+      request.signingid.toAddress()!,
+      request.signature!.signature,
+      request.getDetailsHash(sigInfo.height),
+      getIdentityResult,
+      chainIAddr
+    );
+  }
+
+  private async signLoginResponse(
     response: LoginConsentResponse | LoginConsentProvisioningResponse,
     primaryAddrWif: string,
     getIdentityResult?: GetIdentityResponse["result"],
@@ -429,7 +535,39 @@ class VerusIdInterface {
     return response;
   }
 
-  private async createResponse(
+  async signIdentityUpdateResponse(
+    response: IdentityUpdateResponse,
+    primaryAddrWif: string,
+    getIdentityResult?: GetIdentityResponse["result"],
+    currentHeight?: number
+  ): Promise<IdentityUpdateResponse> {
+    response.setSigned();
+
+    let height = currentHeight;
+
+    if (height == null) {
+      height = await this.getCurrentHeight();
+    }
+
+    const sig = await this.signHash(
+      response.signingid.toAddress()!,
+      response.getDetailsHash(height),
+      primaryAddrWif,
+      getIdentityResult,
+      height,
+      response.systemid.toAddress()!
+    );
+
+    response.signature = new VerusIDSignature(
+      { signature: sig },
+      LOGIN_CONSENT_RESPONSE_SIG_VDXF_KEY,
+      false
+    );
+
+    return response;
+  }
+
+  private async createLoginResponse(
     signingId: string,
     decision: LoginConsentDecision | LoginConsentProvisioningDecision,
     primaryAddrWif?: string,
@@ -465,6 +603,35 @@ class VerusIdInterface {
     } else return req;
   }
 
+  async createIdentityUpdateResponse(
+    signingId: string,
+    details: IdentityUpdateResponseDetails,
+    primaryAddrWif?: string,
+    getIdentityResult?: GetIdentityResponse["result"],
+    currentHeight?: number,
+    chainIAddr?: string
+  ): Promise<IdentityUpdateResponse> {
+    let chainId: string;
+
+    if (chainIAddr != null) chainId = chainIAddr;
+    else chainId = await this.getChainId();
+
+    const req = new IdentityUpdateResponse({
+      signingid: IdentityID.fromAddress(signingId),
+      systemid: IdentityID.fromAddress(chainId),
+      details
+    })
+
+    if (primaryAddrWif) {
+      return this.signIdentityUpdateResponse(
+        req,
+        primaryAddrWif,
+        getIdentityResult,
+        currentHeight
+      );
+    } else return req;
+  }
+
   private async verifyResponse(
     response: LoginConsentResponse | LoginConsentProvisioningResponse,
     getIdentityResult?: GetIdentityResponse["result"],
@@ -480,6 +647,46 @@ class VerusIdInterface {
       response.signing_id,
       response.signature!.signature,
       response.getDecisionHash(sigInfo.height),
+      getIdentityResult,
+      chainIAddr
+    );
+  }
+
+  async verifyIdentityUpdateResponse(
+    response: IdentityUpdateResponse,
+    getIdentityResult?: GetIdentityResponse["result"],
+    chainIAddr?: string,
+    sigBlockTime?: number
+  ): Promise<boolean> {
+    const sigInfo = await this.getSignatureInfo(
+      response.signingid.toAddress()!,
+      response.signature!.signature,
+      chainIAddr
+    );
+
+    let blocktime;
+
+    if (sigBlockTime) blocktime = sigBlockTime;
+    else {
+      const _blockres = await this.interface.getBlock(sigInfo.height.toString());
+      if (_blockres.error) throw new Error(_blockres.error.message);
+
+      blocktime = (_blockres.result as BlockInfo).time;
+    }
+
+    if (
+      BigNumber(blocktime)
+        .minus(response.details.createdat!.toString())
+        .abs()
+        .isGreaterThan(LOGIN_CONSENT_SIG_TIME_DIFF_THRESHOLD)
+    ) {
+      return false
+    }
+
+    return this.verifyHash(
+      response.signingid.toAddress()!,
+      response.signature!.signature,
+      response.getDetailsHash(sigInfo.height),
       getIdentityResult,
       chainIAddr
     );
@@ -569,7 +776,7 @@ class VerusIdInterface {
     getIdentityResult?: GetIdentityResponse["result"],
     currentHeight?: number
   ): Promise<LoginConsentResponse> {
-    return this.signResponse(
+    return this.signLoginResponse(
       response,
       primaryAddrWif,
       getIdentityResult,
@@ -585,7 +792,7 @@ class VerusIdInterface {
     currentHeight?: number,
     chainIAddr?: string
   ): Promise<LoginConsentResponse> {
-    return this.createResponse(
+    return this.createLoginResponse(
       signingId,
       decision,
       primaryAddrWif,
@@ -694,7 +901,7 @@ class VerusIdInterface {
     getIdentityResult?: GetIdentityResponse["result"],
     currentHeight?: number
   ): Promise<LoginConsentProvisioningResponse> {
-    return this.signResponse(
+    return this.signLoginResponse(
       response,
       primaryAddrWif,
       getIdentityResult,
@@ -710,7 +917,7 @@ class VerusIdInterface {
     currentHeight?: number,
     chainIAddr?: string
   ): Promise<LoginConsentProvisioningResponse> {
-    return this.createResponse(
+    return this.createLoginResponse(
       signingId,
       decision,
       primaryAddrWif,

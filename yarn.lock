@@ -976,6 +976,11 @@ axios@1.7.4:
     form-data "^4.0.0"
     proxy-from-env "^1.1.0"
 
+b4a@^1.0.1:
+  version "1.6.7"
+  resolved "https://registry.yarnpkg.com/b4a/-/b4a-1.6.7.tgz#a99587d4ebbfbd5a6e3b21bdb5d5fa385767abe4"
+  integrity sha512-OnAYlL5b7LEkALw87fUVafQw5rVR9RjwGd4KUwNQ6DrrNmaVaUCgLipfVlzrPQ4tWOR9P0IXGNOx50jYCCdSJg==
+
 babel-jest@^28.1.3:
   version "28.1.3"
   resolved "https://registry.yarnpkg.com/babel-jest/-/babel-jest-28.1.3.tgz#c1187258197c099072156a0a121c11ee1e3917d5"
@@ -1118,6 +1123,21 @@ bip66@^1.1.3:
 bitcoin-ops@^1.3.0, "bitcoin-ops@git+https://github.com/VerusCoin/bitcoin-ops":
   version "1.4.1"
   resolved "git+https://github.com/VerusCoin/bitcoin-ops#a5f8f56e658301bc39881d41740b3a0010530efd"
+
+blake2b-wasm@^2.4.0:
+  version "2.4.0"
+  resolved "https://registry.yarnpkg.com/blake2b-wasm/-/blake2b-wasm-2.4.0.tgz#9115649111edbbd87eb24ce7c04b427e4e2be5be"
+  integrity sha512-S1kwmW2ZhZFFFOghcx73+ZajEfKBqhP82JMssxtLVMxlaPea1p9uoLiUZ5WYyHn0KddwbLc+0vh4wR0KBNoT5w==
+  dependencies:
+    b4a "^1.0.1"
+    nanoassert "^2.0.0"
+
+"blake2b@https://github.com/VerusCoin/blake2b":
+  version "2.1.4"
+  resolved "https://github.com/VerusCoin/blake2b#578dc12b7b68a3ce76d1e1add1402b28a5890a6b"
+  dependencies:
+    blake2b-wasm "^2.4.0"
+    nanoassert "^2.0.0"
 
 bn.js@5.2.1:
   version "5.2.1"
@@ -3259,12 +3279,23 @@ varuint-bitcoin@1.0.4:
     bs58check "2.0.0"
     create-hash "1.2.0"
 
-"verusd-rpc-ts-client@git+https://github.com/VerusCoin/verusd-rpc-ts-client.git":
+"verus-typescript-primitives@git+https://github.com/michaeltout/verus-typescript-primitives.git#identity-update-request":
+  version "1.0.0"
+  resolved "git+https://github.com/michaeltout/verus-typescript-primitives.git#7bafd687a441e156f9554387e92915d6a964a0a8"
+  dependencies:
+    base64url "3.0.1"
+    bech32 "2.0.0"
+    blake2b "https://github.com/VerusCoin/blake2b"
+    bn.js "5.2.1"
+    bs58check "2.0.0"
+    create-hash "1.2.0"
+
+"verusd-rpc-ts-client@git+https://github.com/michaeltout/verusd-rpc-ts-client":
   version "0.1.0"
-  resolved "git+https://github.com/VerusCoin/verusd-rpc-ts-client.git#80fa22bc486e476b9c4b7448fa287a608c3f8857"
+  resolved "git+https://github.com/michaeltout/verusd-rpc-ts-client#5e87335dd83f3ce4227cfa5d153fa25c12644061"
   dependencies:
     axios "1.7.4"
-    verus-typescript-primitives "git+https://github.com/VerusCoin/verus-typescript-primitives.git"
+    verus-typescript-primitives "git+https://github.com/michaeltout/verus-typescript-primitives.git#identity-update-request"
 
 walker@^1.0.8:
   version "1.0.8"
