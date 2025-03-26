@@ -99,7 +99,7 @@ describe('Creates and identity update requests', () => {
   const txidbuf = Buffer.from(txid, 'hex').reverse();
   let baseResponseDetailsConfig = { requestid: requestID, createdat: createdAt, txid: txidbuf, salt };
 
-  test('can sign and verify basic login consent request', async () => {
+  test('can sign and verify basic identity update request', async () => {
     const req = await VerusId.createIdentityUpdateRequest(
       "i8jHXEEYEQ7KEoYe6eKXBib8cUBZ6vjWSd",
       new primitives.IdentityUpdateRequestDetails(requestDetails),

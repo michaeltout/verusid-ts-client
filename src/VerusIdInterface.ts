@@ -994,7 +994,7 @@ class VerusIdInterface {
   // untrusted server to get your identity base and then editing, you could be updating an ID with data you don't
   // want to update.
   async createUpdateIdentityTransaction(
-    identity: Identity,
+    identity: Identity | IdentityUpdateRequestDetails,
     changeAddress: string,
     rawIdentityTransaction: string,
     identityTransactionHeight: number,
@@ -1002,7 +1002,8 @@ class VerusIdInterface {
     chainIAddr?: string,
     fee: number = 0.0001,
     fundRawTransactionResult?: FundRawTransactionResponse["result"],
-    currentHeight?: number
+    currentHeight?: number,
+    updateIdentityTransactionHex?: string
   ): Promise<{hex: string, utxos: GetAddressUtxosResponse["result"]}> {
     let height = currentHeight;
     let chainId: string;
@@ -1011,9 +1012,37 @@ class VerusIdInterface {
       height = await this.getCurrentHeight();
     }
 
-    identity.upgradeVersion();
-    
-    const unfundedTxHex = createUnfundedIdentityUpdate(identity.toBuffer().toString('hex'), networks.verus, height + 20);
+    const identityTransaction = Transaction.fromHex(rawIdentityTransaction, networks.verus);
+    let unfundedTxHex: string;
+    let identityAddress: string;
+
+    if (identity instanceof Identity) {
+      identity.upgradeVersion();
+      unfundedTxHex = createUnfundedIdentityUpdate(identity.toBuffer().toString('hex'), networks.verus, height + 20);
+
+      identityAddress = identity.getIdentityAddress()
+    } else if (identity instanceof IdentityUpdateRequestDetails) {
+      if (identity.txid && identity.txid !== identityTransaction.getId()) {
+        throw new Error("Identity update request txid does not match the txid of the identity transaction")
+      };
+
+      if (updateIdentityTransactionHex) {
+        unfundedTxHex = updateIdentityTransactionHex;
+      } else {
+        const idCliJson = identity.toCLIJson();
+        const hexRes = (await this.interface.updateIdentity(idCliJson, true));
+  
+        if (hexRes.error) throw new Error(hexRes.error.message);
+        else unfundedTxHex = hexRes.result;
+      }
+
+      const unfundedTx = Transaction.fromHex(unfundedTxHex, networks.verus);
+      unfundedTx.ins = [];
+
+      unfundedTxHex = unfundedTx.toHex();
+      
+      identityAddress = identity.getIdentityAddress();
+    } else throw new Error("Invalid identity type");
 
     let fundedTxHex;
 
@@ -1044,7 +1073,7 @@ class VerusIdInterface {
       changeAddress,
       networks.verus,
       utxoList
-    )
+    );
 
     const deltas = new Map();
 
@@ -1069,8 +1098,6 @@ class VerusIdInterface {
       }
     })
     
-    const identityTransaction = Transaction.fromHex(rawIdentityTransaction, networks.verus);
-    
     let vout = -1;
 
     for (let i = 0; i < identityTransaction.outs.length; i++) {
@@ -1089,7 +1116,7 @@ class VerusIdInterface {
       const __identity = new Identity();
       __identity.fromBuffer(outParams.getParamObject()!)
 
-      if (__identity.getIdentityAddress() === identity.getIdentityAddress()) {
+      if (__identity.getIdentityAddress() === identityAddress) {
         vout = i;
         break;
       }
@@ -1138,7 +1165,7 @@ class VerusIdInterface {
 
     // Add ID definition UTXO to utxosUsed
     utxosUsed.push({
-      address: identity.getIdentityAddress(),
+      address: identityAddress,
       txid: txid,
       outputIndex: vout,
       script: identityTransaction.outs[vout].script.toString('hex'),

@@ -46,7 +46,7 @@ declare class VerusIdInterface {
     static signVerusIdProvisioningRequest(request: LoginConsentProvisioningRequest, addrWif: string): Promise<LoginConsentProvisioningRequest>;
     static createVerusIdProvisioningRequest(signingAddress: string, challenge: LoginConsentProvisioningChallenge, addrWif?: string): Promise<LoginConsentProvisioningRequest>;
     static verifyVerusIdProvisioningRequest(request: LoginConsentProvisioningRequest, address: string): Promise<LoginConsentProvisioningRequest>;
-    createUpdateIdentityTransaction(identity: Identity, changeAddress: string, rawIdentityTransaction: string, identityTransactionHeight: number, utxoList: GetAddressUtxosResponse["result"], chainIAddr?: string, fee?: number, fundRawTransactionResult?: FundRawTransactionResponse["result"], currentHeight?: number): Promise<{
+    createUpdateIdentityTransaction(identity: Identity | IdentityUpdateRequestDetails, changeAddress: string, rawIdentityTransaction: string, identityTransactionHeight: number, utxoList: GetAddressUtxosResponse["result"], chainIAddr?: string, fee?: number, fundRawTransactionResult?: FundRawTransactionResponse["result"], currentHeight?: number, updateIdentityTransactionHex?: string): Promise<{
         hex: string;
         utxos: GetAddressUtxosResponse["result"];
     }>;
