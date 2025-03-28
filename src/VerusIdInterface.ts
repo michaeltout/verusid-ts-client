@@ -28,6 +28,8 @@ import {
   IdentityID,
   IdentityUpdateResponse,
   IdentityUpdateResponseDetails,
+  VerusCLIVerusIDJson,
+  PartialIdentity,
 } from "verus-typescript-primitives";
 import { VerusdRpcInterface } from "verusd-rpc-ts-client";
 import {
@@ -1012,16 +1014,75 @@ class VerusIdInterface {
       height = await this.getCurrentHeight();
     }
 
+    let vout = -1
+    
+    function getIdentityFromIdTx(transaction: typeof Transaction, idAddr: string, strict: boolean = false): { vout: number, identity: Identity } {
+      let index = -1;
+      let id: Identity | null = null;
+
+      for (let i = 0; i < transaction.outs.length; i++) {
+        const decomp = decompile(transaction.outs[i].script);
+
+        if (decomp.length !== 4 || decomp[1] !== OPS.OP_CHECKCRYPTOCONDITION || decomp[3] !== OPS.OP_DROP) {
+          if (strict) throw new Error("Unknown script format output found in transaction");
+          continue;
+        }
+
+        const outMaster = OptCCParams.fromChunk(decomp[0] as Buffer);
+        const outParams = OptCCParams.fromChunk(decomp[2] as Buffer);
+
+        if (!outMaster.eval_code.eq(new BN(EVALS.EVAL_NONE))) {
+          if (strict) throw new Error("Unsupported master eval code " + outMaster.eval_code.toNumber() + " found in transaction output");
+          continue;
+        }
+
+        // Notary evidence eval codes are supported even in strict mode to allow for data included in the transaction as a result of 
+        // a signdata style updateidentity request. The data itself isn't verified and must be clearly displayed to the user, or the app
+        // must verify that the key the data is under is indeed in the request signer's namespace
+        if (!outParams.eval_code.eq(new BN(EVALS.EVAL_IDENTITY_PRIMARY))) {
+          if (strict && !outParams.eval_code.eq(new BN(EVALS.EVAL_NOTARY_EVIDENCE))) {
+            throw new Error("Unsupported params eval code " + outParams.eval_code.toNumber() + " found in transaction output");
+          }
+
+          continue;
+        }
+
+        if (strict && id != null) throw new Error("Multiple identity outputs found in transaction");
+
+        id = new Identity();
+        id.fromBuffer(outParams.getParamObject()!);
+
+
+        if (id.getIdentityAddress() === idAddr) {
+          index = i;
+          if (!strict) break;
+        } else if (strict) {
+          throw new Error("Identity output does not match identity address");
+        }
+      }
+
+      if (index < 0) {
+        throw new Error("Identity output not found");
+      } else {
+        return { vout: index, identity: id! }
+      }
+    }
+
     const identityTransaction = Transaction.fromHex(rawIdentityTransaction, networks.verus);
     let unfundedTxHex: string;
     let identityAddress: string;
 
     if (identity instanceof Identity) {
+      // If identity is an identity object, assume that the object can be used at the output and that the user filled it in correctly
       identity.upgradeVersion();
       unfundedTxHex = createUnfundedIdentityUpdate(identity.toBuffer().toString('hex'), networks.verus, height + 20);
 
-      identityAddress = identity.getIdentityAddress()
+      identityAddress = identity.getIdentityAddress();
+      vout = getIdentityFromIdTx(identityTransaction, identityAddress).vout;
     } else if (identity instanceof IdentityUpdateRequestDetails) {
+      // If identity is an identityupdaterequest, that only contains a partial identity with the changes the user wants to make, so we 
+      // need to fill in the rest of the ID in a way that doesn't trust the server without verification
+
       if (identity.txid && identity.txid !== identityTransaction.getId()) {
         throw new Error("Identity update request txid does not match the txid of the identity transaction")
       };
@@ -1042,6 +1103,81 @@ class VerusIdInterface {
       unfundedTxHex = unfundedTx.toHex();
       
       identityAddress = identity.getIdentityAddress();
+      
+      const detailsFromRawTransaction = getIdentityFromIdTx(identityTransaction, identityAddress);
+      vout = detailsFromRawTransaction.vout;
+
+      const identityFromServer = getIdentityFromIdTx(unfundedTx, identityAddress, true).identity;
+      const identityFromRawTransaction = detailsFromRawTransaction.identity;
+      const identityFromRawTransactionJson = identityFromRawTransaction.toJson();
+
+      const partialIdentity = identity.identity!;
+      const serverIdentityJson = identityFromServer.toJson();
+      const partialIdentityJson = partialIdentity.toJson();
+
+      const changedKeys = Object.keys(partialIdentityJson);
+
+      // Compare keys that were both changed and unchanged to ensure that changes are the same in funded tx from server
+      let serverChangedKeysComp: { [key: string]: any } = {};
+      let serverUnchangedKeysComp: { [key: string]: any } = {};
+      let fromTxUnchangedKeysComp:  { [key: string]: any } = {};
+
+      // Separate out changed keys and unchanged keys, keeping name in all categories as it
+      // should never be null or changed
+      for (const key of Object.keys(identityFromRawTransactionJson) as Array<keyof VerusCLIVerusIDJson>) {
+        if (key === 'name') {
+          serverChangedKeysComp[key] = serverIdentityJson[key];
+          serverUnchangedKeysComp[key] = serverIdentityJson[key];
+          fromTxUnchangedKeysComp[key] = identityFromRawTransactionJson[key];
+        } else if (changedKeys.includes(key)) {
+          serverChangedKeysComp[key] = serverIdentityJson[key];
+        } else {
+          serverUnchangedKeysComp[key] = serverIdentityJson[key];
+          fromTxUnchangedKeysComp[key] = identityFromRawTransactionJson[key];
+        }
+      }
+
+      const serverKeysChangedCompJson = serverChangedKeysComp as VerusCLIVerusIDJson;
+      const serverKeysUnchangedCompJson = serverUnchangedKeysComp as VerusCLIVerusIDJson;
+      const fromTxKeysUnchangedCompJson = fromTxUnchangedKeysComp as VerusCLIVerusIDJson;
+
+      // Ignore cmm fields that contained the "data" field because we can't establish if the cmm and/or encryption was 
+      // done correctly yet
+      if (identity.containsSignData()) {
+        const signDataKeys = identity.signdatamap!.keys();
+
+        if (serverKeysChangedCompJson.contentmultimap) {
+          for (const key of signDataKeys) {
+            delete serverKeysChangedCompJson.contentmultimap[key];
+          }
+        } else throw new Error("Expected cmm in identity update request");
+      } else if (unfundedTx.outs.length > 1) {
+        // Outputs without signdata should only have an identity output and nothing else
+        throw new Error("Expected only one output in identity update request");
+      }
+      
+      // Create partialidentity from the server identity json, taking only keys that were submitted to be modified,
+      // and then serialize it and compare it to the partial identity that was submitted, to ensure they are the same.
+      const serverPartialIdChangedComp = PartialIdentity.fromJson(serverKeysChangedCompJson);
+      if (serverPartialIdChangedComp.toBuffer().toString('hex') !== partialIdentity.toBuffer().toString('hex')) {
+        throw new Error(
+          "Identity update request changes do not appear to match the changes in the identity transaction, got " + 
+          JSON.stringify(serverPartialIdChangedComp.toJson()) + 
+          " expected " + 
+          JSON.stringify(partialIdentity.toJson())
+        );
+      }
+
+      const serverPartialIdUnchangedComp = PartialIdentity.fromJson(serverKeysUnchangedCompJson);
+      const fromTxPartialIdUnchangedComp = PartialIdentity.fromJson(fromTxKeysUnchangedCompJson);
+      if (serverPartialIdUnchangedComp.toBuffer().toString('hex') !== fromTxPartialIdUnchangedComp.toBuffer().toString('hex')) {
+        throw new Error(
+          "Unchanged identity properties returned from server do not appear to match the unchanged values from the identity transaction, got " + 
+          JSON.stringify(serverPartialIdUnchangedComp.toJson()) + 
+          " expected " + 
+          JSON.stringify(fromTxPartialIdUnchangedComp.toJson())
+        );
+      }
     } else throw new Error("Invalid identity type");
 
     let fundedTxHex;
@@ -1097,34 +1233,6 @@ class VerusIdInterface {
         throw new Error("Incorrect fee.")
       }
     })
-    
-    let vout = -1;
-
-    for (let i = 0; i < identityTransaction.outs.length; i++) {
-      const decomp = decompile(identityTransaction.outs[i].script);
-
-      if (decomp.length !== 4) continue;
-      if (decomp[1] !== OPS.OP_CHECKCRYPTOCONDITION) continue;
-      if (decomp[3] !== OPS.OP_DROP) continue;
-
-      const outMaster = OptCCParams.fromChunk(decomp[0] as Buffer);
-      const outParams = OptCCParams.fromChunk(decomp[2] as Buffer);
-
-      if (!outMaster.eval_code.eq(new BN(EVALS.EVAL_NONE))) continue;
-      if (!outParams.eval_code.eq(new BN(EVALS.EVAL_IDENTITY_PRIMARY))) continue;
-
-      const __identity = new Identity();
-      __identity.fromBuffer(outParams.getParamObject()!)
-
-      if (__identity.getIdentityAddress() === identityAddress) {
-        vout = i;
-        break;
-      }
-    }
-
-    if (vout < 0) {
-      throw new Error("Identity output not found");
-    }
 
     const fundedTx = Transaction.fromHex(fundedTxHex, networks.verus);
     const utxosUsed: GetAddressUtxosResponse["result"] = [];
