@@ -1006,7 +1006,7 @@ class VerusIdInterface {
     fundRawTransactionResult?: FundRawTransactionResponse["result"],
     currentHeight?: number,
     updateIdentityTransactionHex?: string
-  ): Promise<{hex: string, utxos: GetAddressUtxosResponse["result"]}> {
+  ): Promise<{ hex: string; utxos: GetAddressUtxosResponse["result"]; identity: Identity; }> {
     let height = currentHeight;
     let chainId: string;
 
@@ -1015,6 +1015,7 @@ class VerusIdInterface {
     }
 
     let vout = -1
+    let identityOnOutput: Identity;
     
     function getIdentityFromIdTx(transaction: typeof Transaction, idAddr: string, strict: boolean = false): { vout: number, identity: Identity } {
       let index = -1;
@@ -1078,7 +1079,10 @@ class VerusIdInterface {
       unfundedTxHex = createUnfundedIdentityUpdate(identity.toBuffer().toString('hex'), networks.verus, height + 20);
 
       identityAddress = identity.getIdentityAddress();
-      vout = getIdentityFromIdTx(identityTransaction, identityAddress).vout;
+      const identityFromIdTx = getIdentityFromIdTx(identityTransaction, identityAddress);
+
+      vout = identityFromIdTx.vout;
+      identityOnOutput = identityFromIdTx.identity;
     } else if (identity instanceof IdentityUpdateRequestDetails) {
       // If identity is an identityupdaterequest, that only contains a partial identity with the changes the user wants to make, so we 
       // need to fill in the rest of the ID in a way that doesn't trust the server without verification
@@ -1106,6 +1110,7 @@ class VerusIdInterface {
       
       const detailsFromRawTransaction = getIdentityFromIdTx(identityTransaction, identityAddress);
       vout = detailsFromRawTransaction.vout;
+      identityOnOutput = detailsFromRawTransaction.identity;
 
       const identityFromServer = getIdentityFromIdTx(unfundedTx, identityAddress, true).identity;
       const identityFromRawTransaction = detailsFromRawTransaction.identity;
@@ -1283,7 +1288,7 @@ class VerusIdInterface {
       blocktime: 0 // Filled in to avoid getblock call because blocktime is not currently checked for the ID definition utxo
     })
 
-    return { hex: completeIdentityUpdate, utxos: utxosUsed };
+    return { hex: completeIdentityUpdate, utxos: utxosUsed, identity: identityOnOutput };
   }
 
   async createRevokeIdentityTransaction(
@@ -1296,7 +1301,7 @@ class VerusIdInterface {
     fee: number = 0.0001,
     fundRawTransactionResult?: FundRawTransactionResponse["result"],
     currentHeight?: number
-  ): Promise<{hex: string, utxos: GetAddressUtxosResponse["result"]}> {
+  ): Promise<{ hex: string;  utxos: GetAddressUtxosResponse["result"]; identity: Identity; }> {
     const identity = new Identity();
     identity.fromBuffer(_identity.toBuffer());
 
@@ -1326,7 +1331,7 @@ class VerusIdInterface {
     fee: number = 0.0001,
     fundRawTransactionResult?: FundRawTransactionResponse["result"],
     currentHeight?: number
-  ): Promise<{hex: string, utxos: GetAddressUtxosResponse["result"]}> {
+  ): Promise<{ hex: string; utxos: GetAddressUtxosResponse["result"]; identity: Identity; }> {
     const identity = new Identity();
     identity.fromBuffer(_identity.toBuffer());
 

@@ -49,14 +49,17 @@ declare class VerusIdInterface {
     createUpdateIdentityTransaction(identity: Identity | IdentityUpdateRequestDetails, changeAddress: string, rawIdentityTransaction: string, identityTransactionHeight: number, utxoList: GetAddressUtxosResponse["result"], chainIAddr?: string, fee?: number, fundRawTransactionResult?: FundRawTransactionResponse["result"], currentHeight?: number, updateIdentityTransactionHex?: string): Promise<{
         hex: string;
         utxos: GetAddressUtxosResponse["result"];
+        identity: Identity;
     }>;
     createRevokeIdentityTransaction(_identity: Identity, changeAddress: string, rawIdentityTransaction: string, identityTransactionHeight: number, utxoList: GetAddressUtxosResponse["result"], chainIAddr?: string, fee?: number, fundRawTransactionResult?: FundRawTransactionResponse["result"], currentHeight?: number): Promise<{
         hex: string;
         utxos: GetAddressUtxosResponse["result"];
+        identity: Identity;
     }>;
     createRecoverIdentityTransaction(_identity: Identity, changeAddress: string, rawIdentityTransaction: string, identityTransactionHeight: number, utxoList: GetAddressUtxosResponse["result"], chainIAddr?: string, fee?: number, fundRawTransactionResult?: FundRawTransactionResponse["result"], currentHeight?: number): Promise<{
         hex: string;
         utxos: GetAddressUtxosResponse["result"];
+        identity: Identity;
     }>;
     /**
      *
