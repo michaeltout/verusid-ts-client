@@ -1000,13 +1000,13 @@ class VerusIdInterface {
     changeAddress: string,
     rawIdentityTransaction: string,
     identityTransactionHeight: number,
-    utxoList: GetAddressUtxosResponse["result"],
+    utxoList?: GetAddressUtxosResponse["result"],
     chainIAddr?: string,
     fee: number = 0.0001,
     fundRawTransactionResult?: FundRawTransactionResponse["result"],
     currentHeight?: number,
     updateIdentityTransactionHex?: string
-  ): Promise<{ hex: string; utxos: GetAddressUtxosResponse["result"]; identity: Identity; }> {
+  ): Promise<{ hex: string; utxos: GetAddressUtxosResponse["result"]; identity: Identity; deltas: Map<string, BigNumber>; }> {
     let height = currentHeight;
     let chainId: string;
 
@@ -1187,7 +1187,9 @@ class VerusIdInterface {
 
     let fundedTxHex;
 
-    if (fundRawTransactionResult == null) {
+    if (utxoList == null) {
+      fundedTxHex = unfundedTxHex;
+    } else if (fundRawTransactionResult == null) {
       const _fundRawTxRes = await this.interface.fundRawTransaction(
         unfundedTxHex,
         utxoList.map(utxo => {
@@ -1207,88 +1209,90 @@ class VerusIdInterface {
     if (chainIAddr != null) chainId = chainIAddr;
     else chainId = await this.getChainId();
 
-    const validation = validateFundedCurrencyTransfer(
-      chainId,
-      fundedTxHex,
-      unfundedTxHex,
-      changeAddress,
-      networks.verus,
-      utxoList
-    );
+    const deltas: Map<string, BigNumber> = new Map();
 
-    const deltas = new Map();
-
-    if (!validation.valid) throw new Error(validation.message);
-    else {
-      for (const key in validation.sent) {
-        if (BigNumber(validation.sent[key]).isGreaterThan(BigNumber(0))) {
-          throw new Error("Cannot send currency and update ID.")
+    if (utxoList) {
+      const validation = validateFundedCurrencyTransfer(
+        chainId,
+        fundedTxHex,
+        unfundedTxHex,
+        changeAddress,
+        networks.verus,
+        utxoList
+      );
+  
+      if (!validation.valid) throw new Error(validation.message);
+      else {
+        for (const key in validation.sent) {
+          if (BigNumber(validation.sent[key]).isGreaterThan(BigNumber(0))) {
+            throw new Error("Cannot send currency and update ID.")
+          }
         }
-      }
+  
+        for (const key in validation.fees) {
+          if (deltas.has(key)) deltas.set(key, deltas.get(key)!.minus(BigNumber(validation.fees[key])))
+          else deltas.set(key, BigNumber(validation.fees[key]).multipliedBy(BigNumber(-1)))
+        }
+      };
+  
+      const feeSatoshis = BigNumber(fee).multipliedBy(BigNumber(10).pow(BigNumber(8)));
+      deltas.forEach((value, key) => {
+        if ((key !== chainId || value.isGreaterThan(0)) || (key === chainId && value.multipliedBy(-1).isGreaterThan(feeSatoshis))) {
+          throw new Error("Incorrect fee.")
+        }
+      })
 
-      for (const key in validation.fees) {
-        if (deltas.has(key)) deltas.set(key, deltas.get(key).minus(BigNumber(validation.fees[key])))
-        else deltas.set(key, BigNumber(validation.fees[key]).multipliedBy(BigNumber(-1)))
-      }
-    };
+      const fundedTx = Transaction.fromHex(fundedTxHex, networks.verus);
+      const utxosUsed: GetAddressUtxosResponse["result"] = [];
+  
+      // Add funding UTXOs to utxosUsed
+      fundedTx.ins.forEach((input: {
+        hash: Buffer,
+        index: number,
+        script: Buffer,
+        sequence: BigNumber,
+        witness: Array<any>
+      }) => {
+        const inputFromList = utxoList.find(utxo => {
+          const inputHash = Buffer.from(input.hash).reverse().toString('hex');
+  
+          return utxo.txid === inputHash && utxo.outputIndex === input.index;
+        });
+  
+        if (inputFromList) {
+          utxosUsed.push(inputFromList);
+        } else throw new Error("Input not found in UTXO list");
+      })
+  
+      const txid = identityTransaction.getId();
+  
+      // Add ID defintion to identity update tx hex
+      const completeIdentityUpdate: string = completeFundedIdentityUpdate(
+        fundedTxHex,
+        networks.verus,
+        utxoList.map(x => Buffer.from(x.script, 'hex')),
+        {
+          hash: Buffer.from(txid, 'hex').reverse(),
+          index: vout,
+          script: identityTransaction.outs[vout].script,
+          sequence: 4294967295
+        }
+      )
+  
+      // Add ID definition UTXO to utxosUsed
+      utxosUsed.push({
+        address: identityAddress,
+        txid: txid,
+        outputIndex: vout,
+        script: identityTransaction.outs[vout].script.toString('hex'),
+        satoshis: 0,
+        height: identityTransactionHeight,
+        isspendable: 0,
+        blocktime: 0 // Filled in to avoid getblock call because blocktime is not currently checked for the ID definition utxo
+      })
 
-    const feeSatoshis = BigNumber(fee).multipliedBy(BigNumber(10).pow(BigNumber(8)));
-    deltas.forEach((value, key) => {
-      if ((key !== chainId || value.isGreaterThan(0)) || (key === chainId && value.multipliedBy(-1).isGreaterThan(feeSatoshis))) {
-        throw new Error("Incorrect fee.")
-      }
-    })
-
-    const fundedTx = Transaction.fromHex(fundedTxHex, networks.verus);
-    const utxosUsed: GetAddressUtxosResponse["result"] = [];
-
-    // Add funding UTXOs to utxosUsed
-    fundedTx.ins.forEach((input: {
-      hash: Buffer,
-      index: number,
-      script: Buffer,
-      sequence: BigNumber,
-      witness: Array<any>
-    }) => {
-      const inputFromList = utxoList.find(utxo => {
-        const inputHash = Buffer.from(input.hash).reverse().toString('hex');
-
-        return utxo.txid === inputHash && utxo.outputIndex === input.index;
-      });
-
-      if (inputFromList) {
-        utxosUsed.push(inputFromList);
-      } else throw new Error("Input not found in UTXO list");
-    })
-
-    const txid = identityTransaction.getId();
-
-    // Add ID defintion to identity update tx hex
-    const completeIdentityUpdate: string = completeFundedIdentityUpdate(
-      fundedTxHex,
-      networks.verus,
-      utxoList.map(x => Buffer.from(x.script, 'hex')),
-      {
-        hash: Buffer.from(txid, 'hex').reverse(),
-        index: vout,
-        script: identityTransaction.outs[vout].script,
-        sequence: 4294967295
-      }
-    )
-
-    // Add ID definition UTXO to utxosUsed
-    utxosUsed.push({
-      address: identityAddress,
-      txid: txid,
-      outputIndex: vout,
-      script: identityTransaction.outs[vout].script.toString('hex'),
-      satoshis: 0,
-      height: identityTransactionHeight,
-      isspendable: 0,
-      blocktime: 0 // Filled in to avoid getblock call because blocktime is not currently checked for the ID definition utxo
-    })
-
-    return { hex: completeIdentityUpdate, utxos: utxosUsed, identity: identityOnOutput };
+      return { hex: completeIdentityUpdate, utxos: utxosUsed, identity: identityOnOutput, deltas };
+    } else return { hex: fundedTxHex, utxos: [], identity: identityOnOutput, deltas };
   }
 
   async createRevokeIdentityTransaction(
@@ -1296,12 +1300,12 @@ class VerusIdInterface {
     changeAddress: string,
     rawIdentityTransaction: string,
     identityTransactionHeight: number,
-    utxoList: GetAddressUtxosResponse["result"],
+    utxoList?: GetAddressUtxosResponse["result"],
     chainIAddr?: string,
     fee: number = 0.0001,
     fundRawTransactionResult?: FundRawTransactionResponse["result"],
     currentHeight?: number
-  ): Promise<{ hex: string;  utxos: GetAddressUtxosResponse["result"]; identity: Identity; }> {
+  ): Promise<{ hex: string;  utxos: GetAddressUtxosResponse["result"]; identity: Identity; deltas: Map<string, BigNumber>; }> {
     const identity = new Identity();
     identity.fromBuffer(_identity.toBuffer());
 
@@ -1326,12 +1330,12 @@ class VerusIdInterface {
     changeAddress: string,
     rawIdentityTransaction: string,
     identityTransactionHeight: number,
-    utxoList: GetAddressUtxosResponse["result"],
+    utxoList?: GetAddressUtxosResponse["result"],
     chainIAddr?: string,
     fee: number = 0.0001,
     fundRawTransactionResult?: FundRawTransactionResponse["result"],
     currentHeight?: number
-  ): Promise<{ hex: string; utxos: GetAddressUtxosResponse["result"]; identity: Identity; }> {
+  ): Promise<{ hex: string; utxos: GetAddressUtxosResponse["result"]; identity: Identity; deltas: Map<string, BigNumber>; }> {
     const identity = new Identity();
     identity.fromBuffer(_identity.toBuffer());
 
