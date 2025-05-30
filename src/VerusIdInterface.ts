@@ -1082,7 +1082,7 @@ class VerusIdInterface {
       const identityFromIdTx = getIdentityFromIdTx(identityTransaction, identityAddress);
 
       vout = identityFromIdTx.vout;
-      identityOnOutput = identityFromIdTx.identity;
+      identityOnOutput = identity;
     } else if (identity instanceof IdentityUpdateRequestDetails) {
       // If identity is an identityupdaterequest, that only contains a partial identity with the changes the user wants to make, so we 
       // need to fill in the rest of the ID in a way that doesn't trust the server without verification
@@ -1110,11 +1110,11 @@ class VerusIdInterface {
       
       const detailsFromRawTransaction = getIdentityFromIdTx(identityTransaction, identityAddress);
       vout = detailsFromRawTransaction.vout;
-      identityOnOutput = detailsFromRawTransaction.identity;
 
       const identityFromServer = getIdentityFromIdTx(unfundedTx, identityAddress, true).identity;
       const identityFromRawTransaction = detailsFromRawTransaction.identity;
       const identityFromRawTransactionJson = identityFromRawTransaction.toJson();
+      identityOnOutput = identityFromServer;
 
       const partialIdentity = identity.identity!;
       const serverIdentityJson = identityFromServer.toJson();
