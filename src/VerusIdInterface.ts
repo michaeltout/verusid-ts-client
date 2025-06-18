@@ -1005,7 +1005,8 @@ class VerusIdInterface {
     fee: number = 0.0001,
     fundRawTransactionResult?: FundRawTransactionResponse["result"],
     currentHeight?: number,
-    updateIdentityTransactionHex?: string
+    updateIdentityTransactionHex?: string,
+    parseVdxfObjects: boolean = true
   ): Promise<{ hex: string; utxos: GetAddressUtxosResponse["result"]; identity: Identity; deltas: Map<string, BigNumber>; }> {
     let height = currentHeight;
     let chainId: string;
@@ -1051,8 +1052,7 @@ class VerusIdInterface {
         if (strict && id != null) throw new Error("Multiple identity outputs found in transaction");
 
         id = new Identity();
-        id.fromBuffer(outParams.getParamObject()!);
-
+        id.fromBuffer(outParams.getParamObject()!, 0, parseVdxfObjects);
 
         if (id.getIdentityAddress() === idAddr) {
           index = i;
