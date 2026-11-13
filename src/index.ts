@@ -8,6 +8,20 @@ export type {
   IdentityUpdateCurrencyTransferOptions,
   IdentityUpdateTransactionResult
 } from "./VerusIdInterface";
+export type { VerifyDelegatedGenericRequestOptions } from "./VerusIdInterface";
+export * from "./authorization/handshake";
+export * from "./authorization/authority";
+export * from "./authorization/grants";
+export * from "./authorization/profile";
+export { UnsupportedDelegatorProfileError } from "verus-typescript-primitives";
+export * from "./requests/validation";
+export * from "./constants/time";
+export * from "./constants/numbers";
+export { getUnixTime } from "./utils/time";
+export { snapshotRequestValue } from "./utils/requestSnapshot";
+export * from "./identity/identityAuthority";
+export * from "./identity/identityContent";
+export * from "./identity/signatures";
 
 export type {
   ResolveIdentityRegistrationRequest,

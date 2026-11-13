@@ -26,7 +26,7 @@ import {
   localIdentityUploadItems,
 } from "./localUpdateData";
 import { validateIdentityUpdateTransactionSize } from "./updateLimits";
-import { snapshotUpdateRequestValue } from "./requestSnapshot";
+import { snapshotRequestValue } from "../utils/requestSnapshot";
 
 export interface IdentityUpdateDataDecryptionContext {
   /** Requested contentmultimap key whose evidence is being decrypted. */
@@ -166,7 +166,7 @@ export async function verifyIdentityUpdateData(
   expectedSystemId?: string
 ): Promise<true> {
   // Retain exact request fields before callbacks can mutate them.
-  request = snapshotUpdateRequestValue(request);
+  request = snapshotRequestValue(request);
   validateLocalIdentityUploadRequest(request);
   validateIdentityUpdateTransactionSize(unfundedTxHex);
 

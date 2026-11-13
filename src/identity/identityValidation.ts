@@ -20,28 +20,18 @@ import {
 } from "verus-typescript-primitives";
 import { requireCondition, validAddress } from "./fundingPrimitives";
 import { RegistrationError } from "./registrationPolicy";
+import {
+  MAX_IDENTITY_PRIMARY_AUTHORITIES,
+  validateIdentityThreshold as validatePrimaryThreshold,
+  validateIdentityVersion,
+} from "./identityAuthority";
 
-/** Check before upgrading, which otherwise also promotes invalid old versions. */
-export function validateIdentityVersion(version: Identity["version"]): void {
-  requireCondition(
-    BN.isBN(version) &&
-      version.gte(Identity.VERSION_FIRSTVALID) &&
-      version.lte(Identity.VERSION_LASTVALID),
-    "Unsupported identity version."
-  );
-}
+export { validateIdentityVersion } from "./identityAuthority";
 
-function validateIdentityThreshold(
-  minSigs: Identity["minSigs"],
-  keyCount = 25
-): void {
-  requireCondition(
-    BN.isBN(minSigs) &&
-      minSigs.gten(1) &&
-      minSigs.lten(13) &&
-      minSigs.lten(keyCount),
-    "Identity signature threshold must be 1 to 13 and no greater than its primary key count."
-  );
+/** Typed builders require BN fields; RPC identity policies use native integers. */
+function validateIdentityThreshold(minSigs: Identity["minSigs"], keyCount = MAX_IDENTITY_PRIMARY_AUTHORITIES): void {
+  requireCondition(BN.isBN(minSigs), "Identity signature threshold must be a BN value.");
+  validatePrimaryThreshold(minSigs, keyCount);
 }
 
 /** Check before serializing: primary address types are lost in the wire format. */
@@ -50,8 +40,8 @@ export function validateIdentityPrimaryAddresses(
   minSigs?: Identity["minSigs"]
 ): void {
   requireCondition(
-    Array.isArray(keys) && keys.length >= 1 && keys.length <= 25,
-    "Identity requires 1 to 25 primary keys."
+    Array.isArray(keys) && keys.length >= 1 && keys.length <= MAX_IDENTITY_PRIMARY_AUTHORITIES,
+    `Identity requires 1 to ${MAX_IDENTITY_PRIMARY_AUTHORITIES} primary keys.`
   );
   const primaryIDs = new Set<string>();
   for (const key of keys) {

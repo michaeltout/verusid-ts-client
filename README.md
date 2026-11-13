@@ -304,6 +304,185 @@ Ordinary canonical P2PKH, P2PK funding, and supported version-3 native/reserve o
 
 The explicit `allowUnverifiedPrevouts` escape hatch is restricted to `NODE_ENV=test` for trusted static fixtures. Enabling it in any other environment throws before RPC work; direct trusted-prevout fallback calls are also guarded. It still performs structural/accounting checks but does not establish raw-prevout authenticity and returns no portable `fundingApproval`. Omitting funding inputs produces an unfunded template, also without an approval. Neither result is suitable for this verified signing/broadcast workflow.
 
+### Shared request and identity helpers
+
+Validation that is independent of app authorization is exported separately:
+
+| Helper | Purpose |
+| --- | --- |
+| `validateAuthenticationRecipient` | Match a selected identity/system/parent against ordinary authentication recipient constraints. Alternatives within one constraint type are OR; different types are AND. |
+| `validateAuthenticationRequestDetails`, `validateAuthenticationExpiry` | Validate authentication fields and enforce an unexpired signed deadline. |
+| `validateSignedGenericEnvelope` | Check supported envelope versions and signed field consistency; it does not verify the signature or impose app-specific requirements. |
+| `loadIdentityRevision`, `loadIdentityRevisionAtOutpoint` | Resolve validated identity state on a configured system, including an exact historical outpoint. |
+| `loadCurrentIdentityContent` | Read filtered effective CMM and return its identity revision, read height and block hash after freshness checks. |
+| `normalizeIdentityKeyID`, `getIdentityPrimaryKeyIDs`, `recoverIdentitySignatureSigners` | Share key membership and distinct-signer evidence across ordinary signatures, registration and delegation. |
+| `snapshotRequestValue` | Detach mutable request data while preserving primitive classes, buffers, BN values and maps. |
+| `getUnixTime` | Get the current time in whole Unix seconds using shared time-unit constants. |
+
+The content loader returns raw CMM values; the calling feature applies credential
+or profile policy. Likewise, signature recovery supplies evidence, and the caller
+enforces its authority thresholds. Existing authorization-prefixed exports remain
+available as compatibility aliases or thin policy wrappers.
+
+Shared time units live in `src/constants/time.ts`; the BN form of JavaScript's
+safe-integer limit lives in `src/constants/numbers.ts`. Feature-specific deadlines
+and protocol limits stay with the policies that define them.
+
+### Persistent app-instance authorization
+
+The client supports the v1 authorization codecs from the pinned primitives
+`app-authorization-request` branch. `createAppAuthorizationRequest` prepares the
+existing `GenericRequest` envelope; use the existing signer to sign it:
+
+```typescript
+import BN from 'bn.js';
+import { createAppAuthorizationRequest } from 'verusid-ts-client';
+
+const request = createAppAuthorizationRequest({
+  appID,
+  delegate: { systemID: requestSigningSystemID, identityID: delegateID },
+  requestID,
+  expiryTime: new BN(expiryUnixSeconds),
+  offeredIdentities: approvedOffers, // { role, identity: canonicalIAddress }[]
+  requiresSharedStorage: true,
+});
+await delegateClient.signGenericRequest(request, delegateWif);
+```
+
+The helper generates a cryptographically random 32-byte salt. Requests containing
+`gift` default to a signed 24-hour expiry; an explicit expiry overrides that
+default. Requests without gifts require an explicit expiry. Offers do not imply
+storage assignments or required counts. The signed details are exactly
+authentication followed by authorization, with the gift nested inside the latter.
+
+`validateAppAuthorizationRequest(request, { maxRequestBytes, maxGiftBytes })`
+performs structural admission and current expiry checks. Enforce transport byte
+limits before parsing too. `verifyGenericRequest(request)` additionally verifies
+the actual signed-height signature, the delegate's current signing threshold,
+and the app's identity on the request-signing system. Authorization requests
+cannot use `acceptUnsigned`. No existing grant is needed for this bootstrap path.
+
+Initial authorization and every later delegated request also read A's current,
+confirmed effective CMM on D's signing system, filtered by the reserved
+`vrsc::identity.profile.delegator` key. Any presence, including empty, malformed
+or encrypted values, throws `UnsupportedDelegatorProfileError` with code
+`UNSUPPORTED_DELEGATOR_PROFILE`. No profile content is decoded. Failed or
+incomplete reads, changed identity revisions and reorganizations reject too;
+absence is not cached. Effective removal permits the ordinary v1 checks again.
+For validated legacy identity versions 1 and 2, Core omits CMM because those
+versions cannot carry it; the loader treats that omission as an empty map.
+Version 3 must still return an explicit CMM object.
+
+Repeat admission on continuation and immediately before grant submission or
+sensitive execution. `assertAppDelegatorProfileSupportedV1(source, delegator)`
+exposes the same state check for those integration points. The lower-level
+`verifyDelegatedAppAuthorization` requires a `verifyDelegatorProfile` callback;
+use this helper with the configured request-system RPC source. The high-level
+`verifyDelegatedGenericRequest` supplies it automatically and rechecks after
+wallet/control callbacks. A failed delegated check must never select a broader
+scope as a fallback.
+
+Surface the unsupported error locally. When a suitable independent U is
+available, an appropriate signed completion can use the existing `REJECTED`
+outcome; no new response error field or outcome is introduced. Completion
+correlation remains available even when a profile prevents further authorization.
+
+After explicit user review, use `loadAuthorizationIdentity` to retain the exact
+reviewed delegate revision as the grant baseline. `loadOriginalAuthorizationIdentity`
+resolves that outpoint later, including same-block history, without substituting
+current state. `inspectAuthorizationSigners` exposes distinct verified key IDs
+and checks the original/current authority intersection at the larger threshold.
+All identity loaders require `{ rpc: client.interface, systemID: await client.getChainId() }`
+as the source; the identity's home `systemid` is not its lookup-chain context.
+
+For later requests, every delegated handler should call
+`verifyDelegatedGenericRequest(request, options)` immediately before sensitive
+execution or key release:
+
+```typescript
+const accepted = await delegateClient.verifyDelegatedGenericRequest(request, {
+  user: selectedUser, // { identityID, systemID }
+  records: decodeAppAuthorizationRecords(decryptedCredentialEntries),
+  verifyUserControl: async user => wallet.checkCurrentIndependentUserControl(user),
+  verifyStorageControl: async (binding, keys) => {
+    const current = await loadAuthorizationIdentity(requestSystemSource, {
+      systemID: binding.data.storageSystemID,
+      identityID: binding.data.storageID,
+    });
+    return verifyAppAuthorizationStorageState(binding, keys, current) &&
+      await wallet.checkIndependentStorageAuthorities(binding);
+  },
+});
+```
+
+The example's `wallet` methods are application callbacks, not library APIs.
+They must check usable private keys, current user/revocation/recovery control and
+dependencies, the selected wallet profile/network, and freshness of the complete
+effective credential view. A watch-only identity is insufficient. Requests with
+authentication details require an unexpired signed expiry. Other request types
+must supply `verifyFreshness`, enforcing their own signed freshness contract; it
+is checked before and after asynchronous verification. Delegation does not bypass
+normal handler validation, user approval, or encryption of sensitive responses.
+Existing unscoped and explicitly self-controlled flows retain their existing
+entry points; a missing or failed grant never selects either as a fallback.
+
+Each decrypted entry supplies `{ credential, source: { identityID, systemID,
+outerKey, storedValue } }`. `storedValue` is the exact original encrypted CMM
+value used for selective removal. Load a complete confirmed effective bucket,
+filtered by the locally derived self-encryption outer key; retain its identity
+outpoint and chain context. Refresh membership after identity changes, deletions,
+profile/encryption-context changes or reorganizations. Do not merge independently
+aggregated height windows. The decoder and verifier do not fetch/decrypt content
+or maintain a membership cache. Required management records must match the
+primitives' committed storage manifest; separate grants are evaluated independently.
+
+`getAppAuthorizationOperationID(request)` binds signer, system and signed request
+data while ignoring signature encoding. Persist/reserve this ID before side
+effects, reconcile retries using the original transactions, and retain the exact
+prepared response for delivery retries. This helper does not store consumed IDs;
+a wallet-local replay store does not guarantee exactly-once execution across devices.
+
+Once the grant and required setup are confirmed, prepare a completion with
+`createAppAuthorizationResponse(request, { user, outcome, storageBindings })`,
+encrypt its details first if requested, then sign it using
+`userClient.signGenericResponse`. The installed app verifies
+it with `userClient.verifyAppAuthorizationResponse(response, retainedRequest, user)`
+on U's signing system. U can be a newly acquired gifted identity, or an existing
+identity on another system, subject to the signed recipient constraints. Final
+correlation remains valid after expiry for a previously admitted/submitted job;
+the wallet must establish that timely submission and confirmation itself. The
+acknowledgment is not a credential for subsequent requests.
+
+For an encrypted completion, supply the optional fifth argument:
+
+```ts
+const valid = await userClient.verifyAppAuthorizationResponse(
+  response,
+  retainedRequest,
+  user,
+  undefined, // Optional signing-block timestamp; otherwise fetched through RPC.
+  descriptor => wallet.authenticateAndDecryptResponse(descriptor)
+);
+```
+
+`wallet.authenticateAndDecryptResponse` is an application adapter. It receives a
+detached encrypted `DataDescriptor` and must authenticate its ciphertext using
+the intended response recipient's key. Return the raw plaintext `Buffer` from
+decryption: one VDXF-tagged `DataDescriptor` whose `objectdata` holds the original
+response details bytes, matching Mobile's `encryptDataBufferToDescriptor` flow.
+The SDK verifies the original ciphertext signature before invoking the adapter,
+unwraps and validates the plaintext, and refreshes U's authority after decryption.
+Keep the original signed response intact. Missing or failed decryption rejects
+encrypted completions; plaintext completions do not invoke the callback. Apply
+transport size limits before decoding the response.
+
+Use the existing local identity-update builders for gifts, storage changes, grant
+writes and removals. Base updates on the actual identity transaction so opaque
+fields and private addresses survive. Supply only intended new CMM operations;
+never replay the aggregated content map. Durable gift jobs, encrypted persistence,
+explicit authorization review, control-transfer confirmation and broadcast
+reconciliation remain the integrating wallet's responsibility.
+
 ## Contributing
 
 Contributions to `verusid-ts-client` are welcome! Please refer to the project's issues page for proposed features and bug reports. Follow the contribution guidelines for pull requests.

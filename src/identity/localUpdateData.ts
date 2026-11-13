@@ -38,7 +38,7 @@ import bufferutils from "verus-typescript-primitives/dist/utils/bufferutils";
 import varuint from "verus-typescript-primitives/dist/utils/varuint";
 import { fromBech32 } from "verus-typescript-primitives/dist/utils/sapling";
 import { requireCondition } from "./fundingPrimitives";
-import { snapshotUpdateRequestValue } from "./requestSnapshot";
+import { snapshotRequestValue } from "../utils/requestSnapshot";
 import type { IdentityUpdateDataDecryptor } from "./updateDataVerification";
 
 /** Application limits leave room for identity, funding inputs, and signatures. */
@@ -468,7 +468,7 @@ export async function buildLocalIdentityUpdateData({
   contentMultiMap: Map<CompactIAddressObject, Buffer[]>;
 }> {
   // Snapshot caller-owned request data before invoking asynchronous wallet code.
-  request = snapshotUpdateRequestValue(request);
+  request = snapshotRequestValue(request);
   validateLocalIdentityUploadRequest(request, isTestnet);
 
   const chain = fromBase58Check(chainId);

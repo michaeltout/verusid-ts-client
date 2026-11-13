@@ -1,1 +1,1 @@
-export declare function snapshotUpdateRequestValue<T>(value: T): T;
+export { snapshotRequestValue as snapshotUpdateRequestValue } from "../utils/requestSnapshot";

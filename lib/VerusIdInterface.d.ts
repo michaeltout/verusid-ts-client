@@ -1,5 +1,5 @@
 import { AxiosRequestConfig } from "axios";
-import { GetIdentityResponse, LoginConsentRequest, LoginConsentChallenge, LoginConsentProvisioningRequest, LoginConsentProvisioningChallenge, LoginConsentResponse, LoginConsentDecision, LoginConsentProvisioningDecision, LoginConsentProvisioningResponse, SignedSessionObject, SignedSessionObjectData, VerusPayInvoice, VerusPayInvoiceDetails, Identity, GetAddressUtxosResponse, FundRawTransactionResponse, IdentityUpdateRequestDetails, GenericRequest, GenericRequestInterface, GenericResponse, GenericResponseInterface, TransferDestination } from "verus-typescript-primitives";
+import { GetIdentityResponse, LoginConsentRequest, LoginConsentChallenge, LoginConsentProvisioningRequest, LoginConsentProvisioningChallenge, LoginConsentResponse, LoginConsentDecision, LoginConsentProvisioningDecision, LoginConsentProvisioningResponse, SignedSessionObject, SignedSessionObjectData, VerusPayInvoice, VerusPayInvoiceDetails, Identity, GetAddressUtxosResponse, FundRawTransactionResponse, IdentityUpdateRequestDetails, GenericRequest, GenericRequestInterface, GenericResponse, GenericResponseInterface, DataDescriptor, TransferDestination } from "verus-typescript-primitives";
 import { RegistrationRpc } from "./identity/registrationRpc";
 import BigNumber from "bignumber.js";
 import { APIAuthData, RPCRequestOverride } from "verusd-rpc-ts-client/lib/VerusdRpcInterface";
@@ -9,6 +9,14 @@ import { IdentityLockContext } from "./identity/identityLocks";
 import { IdentityUpdateFundingApproval } from "./identity/updateFundingVerification";
 import { IdentityUpdateDataDecryptor } from "./identity/updateDataVerification";
 import { LocalIdentityUploadCrypto } from "./identity/localUpdateData";
+import { AppAuthorizationResponseUser } from "./authorization/handshake";
+import { DelegatedAppAuthorizationOptions } from "./authorization/grants";
+export interface VerifyDelegatedGenericRequestOptions extends Omit<DelegatedAppAuthorizationOptions, "delegate" | "appID" | "verifyAuthority" | "verifyDelegatorProfile"> {
+    /** Required for request types without a signed authentication expiry. */
+    verifyFreshness?: (request: GenericRequest) => Promise<boolean>;
+    /** Trusted signing-block time, if already fetched from this RPC endpoint. */
+    sigBlockTime?: number;
+}
 export type CurrencyTransferOutput = {
     currencies: {
         [currency: string]: string | number;
@@ -91,6 +99,8 @@ declare class VerusIdInterface {
     private signHashOrMessage;
     verifyMessage(iAddrOrIdentity: string, base64Sig: string, message: string, getIdentityResult?: GetIdentityResponse["result"], chainIAddr?: string): Promise<boolean>;
     verifyHash(iAddrOrIdentity: string, base64Sig: string, hash: Buffer, getIdentityResult?: GetIdentityResponse["result"], chainIAddr?: string): Promise<boolean>;
+    /** Resolve names once and parse the same compact signature for every verifier. */
+    private readIdentitySignature;
     private verifyHashOrMessage;
     getSignatureInfo(iAddrOrIdentity: string, base64Sig: string, chainIAddr?: string): Promise<{
         version: number;
@@ -178,7 +188,6 @@ declare class VerusIdInterface {
     private static getTxDestination;
     private static getTokenOutputVersion;
     private static createSmartTransactionOutputScript;
-    private static cloneTransferDestination;
     private static usesRefundDestination;
     private static getReserveTransferDestination;
     private static validateCurrencyTransferOutput;
@@ -224,12 +233,36 @@ declare class VerusIdInterface {
     private createGenericEnvelope;
     private signGenericEnvelope;
     private verifyGenericEnvelope;
+    /** A shared signed-block time check; current request expiry is a separate policy. */
+    private verifySignatureCreationTime;
+    /** Fresh RPC authority evidence, scoped to this connection's signing system. */
+    private loadAuthorizationSignatureContext;
     createGenericRequest: (params: GenericRequestInterface, primaryAddrWif?: string, getIdentityResult?: GetIdentityResponse["result"], currentHeight?: number, chainIAddr?: string) => Promise<GenericRequest>;
     createGenericResponse: (params: GenericResponseInterface, primaryAddrWif?: string, getIdentityResult?: GetIdentityResponse["result"], currentHeight?: number, chainIAddr?: string) => Promise<GenericResponse>;
     signGenericRequest: (request: GenericRequest, primaryAddrWif: string, getIdentityResult?: GetIdentityResponse["result"], currentHeight?: number) => Promise<GenericRequest>;
     signGenericResponse: (request: GenericResponse, primaryAddrWif: string, getIdentityResult?: GetIdentityResponse["result"], currentHeight?: number) => Promise<GenericResponse>;
     static validateUnsignedGenericRequest(request: GenericRequest): boolean;
+    /**
+     * Verify request admission; authorization bootstrap also checks current app
+     * policy and throws UnsupportedDelegatorProfileError for a reserved profile.
+     */
     verifyGenericRequest: (envelope: GenericRequest, getIdentityResult?: GetIdentityResponse["result"], chainIAddr?: string, sigBlockTime?: number, acceptUnsigned?: boolean) => Promise<boolean>;
+    /**
+     * Shared admission for any delegated handler. Supply a complete effective
+     * credential view and current wallet-control checks, then retain the handler's
+     * own approval and response-encryption requirements. No failed grant falls
+     * back to self-controlled or unscoped processing. A present delegator profile
+     * throws UnsupportedDelegatorProfileError so the wallet can explain rejection.
+     */
+    verifyDelegatedGenericRequest(envelope: GenericRequest, options: VerifyDelegatedGenericRequestOptions): Promise<boolean>;
+    /**
+     * Verify a completion against the retained request and the resolved final user.
+     * For encrypted details, decryptDetails authenticates a detached descriptor and
+     * returns raw plaintext: the single VDXF-tagged DataDescriptor used by the
+     * wallet's response encryption. Its objectdata contains the original details
+     * bytes. Private keys stay in the callback; the SDK unwraps and validates data.
+     */
+    verifyAppAuthorizationResponse(response: GenericResponse, request: GenericRequest, user: AppAuthorizationResponseUser, sigBlockTime?: number, decryptDetails?: (descriptor: DataDescriptor) => Buffer | Promise<Buffer>): Promise<boolean>;
     verifyGenericResponse: (envelope: GenericResponse, getIdentityResult?: GetIdentityResponse["result"], chainIAddr?: string, sigBlockTime?: number) => Promise<boolean>;
 }
 export default VerusIdInterface;

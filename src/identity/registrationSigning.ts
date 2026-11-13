@@ -20,6 +20,11 @@ import {
   Transaction,
 } from "@bitgo/utxo-lib";
 import { isIndexMaster } from "./fundingPrimitives";
+import {
+  MAX_IDENTITY_PRIMARY_AUTHORITIES,
+  normalizeIdentityKeyID,
+  validateIdentityThreshold,
+} from "./identityAuthority";
 
 /** Raw source bytes are required, including for zero-value commitment inputs. */
 export interface RegistrationSigningPrevout {
@@ -145,9 +150,9 @@ function skeleton(transaction: any): string {
 }
 
 function keyID(publicKey: Buffer, network: typeof networks.verus): string {
-  ECPair.fromPublicKeyBuffer(publicKey, network);
-
-  return address.toBase58Check(crypto.hash160(publicKey), network.pubKeyHash);
+  return address.toBase58Check(
+    Buffer.from(normalizeIdentityKeyID(publicKey, network), "hex"), network.pubKeyHash
+  );
 }
 
 function authorityMap(
@@ -175,33 +180,25 @@ function authorityMap(
     if (
       !Array.isArray(authority.primaryAddresses) ||
       authority.primaryAddresses.length < 1 ||
-      authority.primaryAddresses.length > 25 ||
-      !Number.isInteger(authority.minimumSignatures) ||
-      authority.minimumSignatures < 1 ||
-      authority.minimumSignatures > 13 ||
-      authority.minimumSignatures > authority.primaryAddresses.length
+      authority.primaryAddresses.length > MAX_IDENTITY_PRIMARY_AUTHORITIES ||
+      authority.primaryAddresses.some(primary => typeof primary !== "string") ||
+      !Number.isInteger(authority.minimumSignatures)
     ) {
       throw new Error("Invalid identity authorization threshold");
     }
 
+    validateIdentityThreshold(authority.minimumSignatures, authority.primaryAddresses.length);
+
     const eligibleKeyIDs = authority.primaryAddresses.map((primary) => {
-      if (/^(02|03)[0-9a-fA-F]{64}$/.test(primary)) {
-        return keyID(Buffer.from(primary, "hex"), network);
+      // Registration keeps its existing compressed-public-key-only contract.
+      // The shared normalizer also supports uncompressed identity authorities.
+      if (/^04[0-9a-fA-F]{128}$/.test(primary)) {
+        throw new Error("Registration primary authorities require compressed public keys or key hashes.");
       }
 
-      const decoded = address.fromBase58Check(primary);
-
-      if (
-        decoded.version !== network.pubKeyHash ||
-        decoded.hash.length !== 20 ||
-        decoded.hash.equals(Buffer.alloc(20))
-      ) {
-        throw new Error(
-          "Identity primary authorities must be public keys or key hashes"
-        );
-      }
-
-      return primary;
+      return address.toBase58Check(
+        Buffer.from(normalizeIdentityKeyID(primary, network), "hex"), network.pubKeyHash
+      );
     });
 
     if (new Set(eligibleKeyIDs).size !== eligibleKeyIDs.length) {

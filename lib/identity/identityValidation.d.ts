@@ -1,6 +1,5 @@
 import { Identity, PartialIdentity } from "verus-typescript-primitives";
-/** Check before upgrading, which otherwise also promotes invalid old versions. */
-export declare function validateIdentityVersion(version: Identity["version"]): void;
+export { validateIdentityVersion } from "./identityAuthority";
 /** Check before serializing: primary address types are lost in the wire format. */
 export declare function validateIdentityPrimaryAddresses(keys: Identity["primaryAddresses"], minSigs?: Identity["minSigs"]): void;
 /** The daemon cannot serialize a multimap key with zero values. Copy first. */

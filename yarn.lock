@@ -3722,10 +3722,10 @@ varuint-bitcoin@1.0.4:
   resolved "https://registry.yarnpkg.com/varuint-bitcoin/-/varuint-bitcoin-1.0.4.tgz#d812c5dae16e32f60544b6adee1d4be1307d0283"
   integrity sha512-2nW4pVicYWxOMY1u+3T3eFXw24wbFlKz+ug7hd02rozYmeFVBoC6LB7/P4E46jN9aD1ezhX01g2Uh4zrZ+9RWw==
 
-"verus-typescript-primitives@git+https://github.com/VerusCoin/verus-typescript-primitives.git", "verus-typescript-primitives@git+https://github.com/VerusCoin/verus-typescript-primitives.git#d5e3068021cfa83e3aae489403f4d63aad0c1a6c":
+"verus-typescript-primitives@git+https://github.com/VerusCoin/verus-typescript-primitives.git", "verus-typescript-primitives@git+https://github.com/VerusCoin/verus-typescript-primitives.git#d5e3068021cfa83e3aae489403f4d63aad0c1a6c", "verus-typescript-primitives@git+https://github.com/michaeltout/verus-typescript-primitives.git#cfa72880c7fa82eeddf3276c8a32536e6aa2c332":
   version "1.0.0"
-  uid d5e3068021cfa83e3aae489403f4d63aad0c1a6c
-  resolved "git+https://github.com/VerusCoin/verus-typescript-primitives.git#d5e3068021cfa83e3aae489403f4d63aad0c1a6c"
+  uid cfa72880c7fa82eeddf3276c8a32536e6aa2c332
+  resolved "git+https://github.com/michaeltout/verus-typescript-primitives.git#cfa72880c7fa82eeddf3276c8a32536e6aa2c332"
   dependencies:
     base64url "3.0.1"
     bech32 "2.0.0"

@@ -1,4 +1,5 @@
 import BN from "bn.js";
+import { MAX_SAFE_INTEGER_BN } from "../constants/numbers";
 import {
   address,
   networks,
@@ -83,7 +84,6 @@ export type RegistrationPlannedOutput = {
 
 // VerusCoin MoneyRange (amount.h / komodo_globals.h) is narrower than int64.
 const MAX_MONEY_RANGE = new BN("5000000000000000000");
-const MAX_SAFE = new BN(Number.MAX_SAFE_INTEGER);
 // BitGo's output and signature-digest type guards impose this narrower bound.
 const MAX_NATIVE = new BN("2100000000000000");
 
@@ -105,7 +105,7 @@ export function atomic(value: string, label = "Amount"): BN {
 
 export function safeNative(value: string): number {
   const amount = atomic(value);
-  if (amount.gt(MAX_SAFE))
+  if (amount.gt(MAX_SAFE_INTEGER_BN))
     throw new RegistrationError(
       "UNSUPPORTED_AMOUNT",
       "Native values exceed the transaction library safe integer range."

@@ -14,7 +14,7 @@ import {
   validateIdentityVersion,
   validatePartialIdentityDefinition,
 } from "./identityValidation";
-import { snapshotUpdateRequestValue } from "./requestSnapshot";
+import { snapshotRequestValue } from "../utils/requestSnapshot";
 import {
   IdentityLockContext,
   normalizeIdentityLockUpdate,
@@ -183,11 +183,11 @@ export function applyLocalIdentityUpdate(
     "Local identity update requires a valid next-block height and expiry."
   );
   validateSupportedIdentityUpdateState(current);
-  const request = snapshotUpdateRequestValue(partial);
+  const request = snapshotRequestValue(partial);
   dropEmptyIdentityContent(request);
   validatePartialIdentityDefinition(request);
 
-  const next = snapshotUpdateRequestValue(current);
+  const next = snapshotRequestValue(current);
   const currentAddress = current.getIdentityAddress(context.rootSystemName);
   next.clearContentMultiMap();
 

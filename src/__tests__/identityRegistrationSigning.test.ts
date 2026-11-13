@@ -39,6 +39,24 @@ const authority: RegistrationIdentityAuthority = {
   minimumSignatures: 2,
 };
 
+test("shared key normalization preserves registration primary-address policy", () => {
+  const compressedAuthority = {
+    ...authority,
+    primaryAddresses: [keys[1].getPublicKeyBuffer().toString("hex"), keys[2].getAddress()],
+  };
+  const inspected = inspectIdentityRegistrationSignatures(fixture(true, 10000, compressedAuthority).args);
+  const requirement = inspected.inputs[0].requirements.find(item => item.identityID === authority.identityID)!;
+  expect(requirement.eligibleKeyIDs).toEqual(authority.primaryAddresses);
+
+  const uncompressed = ECPair.fromPrivateKeyBuffer(Buffer.alloc(32, 2), network);
+  uncompressed.compressed = false;
+  const unsupported = {
+    ...authority,
+    primaryAddresses: [uncompressed.getPublicKeyBuffer().toString("hex"), keys[2].getAddress()],
+  };
+  expect(() => inspectIdentityRegistrationSignatures(fixture(true, 10000, unsupported).args)).toThrow(/compressed/);
+});
+
 function transactionBuilder(): any {
   const builder = new TransactionBuilder(network);
   builder.setVersion(4);

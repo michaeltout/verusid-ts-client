@@ -29,10 +29,16 @@ import {
   GenericRequestInterface,
   GenericResponse,
   GenericResponseInterface,
+  DataDescriptor,
+  DataDescriptorKey,
+  DataDescriptorOrdinalVDXFObject,
+  VDXFDataDescriptor,
   VERUSPAY_VERSION_3,
   VERUSPAY_VERSION_4,
   OrdinalVDXFObject,
   AuthenticationRequestOrdinalVDXFObject,
+  AppAuthorizationIdentity,
+  UnsupportedDelegatorProfileError,
   IdentityUpdateRequestOrdinalVDXFObject,
   VerusPayInvoiceDetailsOrdinalVDXFObject,
   ProvisionIdentityDetailsOrdinalVDXFObject,
@@ -56,6 +62,9 @@ import {
   TxDestination,
   UnknownID,
   decodeDestination,
+  DEFAULT_VERUS_CHAINID,
+  DEFAULT_VERUS_CHAINNAME,
+  EHashTypes,
   KeyID,
   IdentityID,
   DEST_ID,
@@ -75,8 +84,9 @@ import {
   TransactionBuilder
 } from "@bitgo/utxo-lib";
 import { BlockInfo } from "verus-typescript-primitives/dist/block/BlockInfo";
+import { VDXF_OBJECT_DEFAULT_VERSION, X_ADDR_VERSION } from "verus-typescript-primitives/dist/constants/vdxf";
 import BigNumber from "bignumber.js"
-import { BN } from "bn.js";
+import BN from "bn.js";
 import { GenericEnvelope } from "verus-typescript-primitives/dist/vdxf/classes/envelope/GenericEnvelope";
 import { APIAuthData, RPCRequestOverride } from "verusd-rpc-ts-client/lib/VerusdRpcInterface";
 import {
@@ -107,7 +117,7 @@ import { LocalIdentityUploadCrypto, buildLocalIdentityUpdateData, captureLocalId
 import { applyLocalIdentityUpdate, LocalIdentityUpdateResult, validateSupportedIdentityUpdateState } from "./identity/localIdentityUpdate";
 import { validateFullIdentityUpdate } from "./identity/fullIdentityUpdateValidation";
 import { MAX_IDENTITY_UPDATE_EXPIRY_DELTA, MIN_IDENTITY_UPDATE_EXPIRY_DELTA, validateIdentityUpdateTransactionSize } from "./identity/updateLimits";
-import { snapshotUpdateRequestValue } from "./identity/requestSnapshot";
+import { snapshotRequestValue } from "./utils/requestSnapshot";
 import {
   dropEmptyIdentityContent,
   validateIdentityDefinition,
@@ -115,18 +125,44 @@ import {
   validateIdentityVersion,
   validatePartialIdentityDefinition
 } from "./identity/identityValidation";
+import {
+  AppAuthorizationResponseUser,
+  hasAppAuthorizationRequest,
+  validateAppAuthorizationEnvelope,
+  validateAppAuthorizationRequest,
+  validateAppAuthorizationResponse,
+} from "./authorization/handshake";
+import {
+  inspectAuthorizationSigners,
+} from "./authorization/authority";
+import {
+  getIdentityPrimaryKeyIDs,
+  loadIdentityRevision,
+  loadIdentityRevisionAtOutpoint,
+} from "./identity/identityAuthority";
+import { recoverIdentitySignatureSigners } from "./identity/signatures";
+import {
+  DelegatedAppAuthorizationOptions,
+  verifyDelegatedAppAuthorization,
+} from "./authorization/grants";
+import { assertAppDelegatorProfileSupportedV1 } from "./authorization/profile";
+import { validateAuthenticationExpiry } from "./requests/validation";
+import { SECONDS_PER_HOUR } from "./constants/time";
 
 const { createUnfundedIdentityUpdate, validateFundedCurrencyTransfer, completeFundedIdentityUpdate } = smarttxs;
 
-const VRSC_I_ADDRESS = "i5w5MuNik5NtLcYmNzcvaoixooEebB6MGV"
 const ID_SIG_VERSION = 2
-const ID_SIG_TYPE = 5
-const LOGIN_CONSENT_SIG_TIME_DIFF_THRESHOLD = 3600
-const BN_TYPE_REF = new BN(0, 10);
-type BNValue = typeof BN_TYPE_REF;
+const IDENTITY_SIGNATURE_TIME_TOLERANCE_SECONDS = SECONDS_PER_HOUR;
 const RESERVE_TRANSFER_DEFAULT_PER_STEP_FEE = new BN(10000, 10);
 const RESERVE_TRANSFER_DESTINATION_BYTE_DIVISOR = 128;
-const VDXF_TAG_ADDRESS_VERSION = 137;
+
+export interface VerifyDelegatedGenericRequestOptions
+  extends Omit<DelegatedAppAuthorizationOptions, "delegate" | "appID" | "verifyAuthority" | "verifyDelegatorProfile"> {
+  /** Required for request types without a signed authentication expiry. */
+  verifyFreshness?: (request: GenericRequest) => Promise<boolean>;
+  /** Trusted signing-block time, if already fetched from this RPC endpoint. */
+  sigBlockTime?: number;
+}
 
 export type CurrencyTransferOutput = {
   currencies: {
@@ -308,8 +344,8 @@ class VerusIdInterface {
   }
 
   async getChainId() {
-    if (this.interface.chain === "VRSC" || this.interface.chain === VRSC_I_ADDRESS) {
-      return VRSC_I_ADDRESS;
+    if (this.interface.chain === DEFAULT_VERUS_CHAINNAME || this.interface.chain === DEFAULT_VERUS_CHAINID) {
+      return DEFAULT_VERUS_CHAINID;
     } else {
       // An explicitly configured i-address must not be replaced by an RPC response.
       try {
@@ -404,7 +440,7 @@ class VerusIdInterface {
     const sig = new IdentitySignature(
       networks.verus,
       ID_SIG_VERSION,
-      ID_SIG_TYPE,
+      EHashTypes.HASH_SHA256,
       height,
       null,
       chainId,
@@ -429,10 +465,9 @@ class VerusIdInterface {
   ) {
     return this.verifyHashOrMessage(
       iAddrOrIdentity,
-      base64Sig,
+      await this.readIdentitySignature(iAddrOrIdentity, base64Sig, chainIAddr),
       message,
-      getIdentityResult,
-      chainIAddr
+      getIdentityResult
     );
   }
 
@@ -445,40 +480,39 @@ class VerusIdInterface {
   ) {
     return this.verifyHashOrMessage(
       iAddrOrIdentity,
-      base64Sig,
+      await this.readIdentitySignature(iAddrOrIdentity, base64Sig, chainIAddr),
       hash,
-      getIdentityResult,
-      chainIAddr
+      getIdentityResult
     );
+  }
+
+  /** Resolve names once and parse the same compact signature for every verifier. */
+  private async readIdentitySignature(iAddrOrIdentity: string, base64Sig: string, chainIAddr?: string) {
+    let identityAddress = iAddrOrIdentity;
+
+    try {
+      address.fromBase58Check(identityAddress);
+    } catch {
+      const response = await this.interface.getIdentity(iAddrOrIdentity);
+      if (response.error) throw new Error(response.error.message);
+
+      identityAddress = response.result!.identity.identityaddress!;
+    }
+
+    const chainID = chainIAddr ?? await this.getChainId();
+    const signature = new IdentitySignature(networks.verus);
+    signature.fromBuffer(Buffer.from(base64Sig, "base64"), 0, chainID, identityAddress);
+
+    return signature;
   }
 
   private async verifyHashOrMessage(
     iAddrOrIdentity: string,
-    base64Sig: string,
+    sig: typeof IdentitySignature,
     hashOrMessage: Buffer | string,
-    getIdentityResult?: GetIdentityResponse["result"],
-    chainIAddr?: string
+    getIdentityResult?: GetIdentityResponse["result"]
   ) {
-    let iAddress;
     let identityAtHeight;
-    let chainId;
-
-    try {
-      address.fromBase58Check(iAddrOrIdentity);
-      iAddress = iAddrOrIdentity;
-    } catch (e) {
-      const _idres = await this.interface.getIdentity(iAddrOrIdentity);
-      if (_idres.error) throw new Error(_idres.error.message);
-      const identity = _idres.result!;
-      iAddress = identity.identity.identityaddress!;
-    }
-
-    const sig = new IdentitySignature(networks.verus);
-
-    if (chainIAddr != null) chainId = chainIAddr;
-    else chainId = await this.getChainId();
-
-    sig.fromBuffer(Buffer.from(base64Sig, "base64"), 0, chainId, iAddress);
 
     if (getIdentityResult != null) {
       identityAtHeight = getIdentityResult;
@@ -495,33 +529,27 @@ class VerusIdInterface {
       return false;
     }
 
-    const primaryAddresses = identityAtHeight.identity.primaryaddresses;
-    const minsigs = identityAtHeight.identity.minimumsignatures;
-    let sigs = 0;
-    let signedBy: { [key: string]: boolean } = {};
+    try {
+      const minimumSignatures = identityAtHeight.identity.minimumsignatures;
+      const primaryKeys = getIdentityPrimaryKeyIDs(
+        identityAtHeight.identity.primaryaddresses, minimumSignatures
+      );
+      const digest = Buffer.isBuffer(hashOrMessage) ? hashOrMessage : sig.hashMessage(hashOrMessage);
+      const signers = recoverIdentitySignatureSigners(digest, sig.signatures);
 
-    for (let j = 0; j < primaryAddresses.length; j++) {
-      const signingAddress = primaryAddresses[j];
-      if (signedBy[signingAddress]) continue;
-
-      const sigRes = Buffer.isBuffer(hashOrMessage)
-        ? sig.verifyHashOffline(hashOrMessage, signingAddress)
-        : sig.verifyMessageOffline(hashOrMessage, signingAddress);
-
-      if (sigRes.some((x: boolean) => x === true)) {
-        signedBy[signingAddress] = true;
-      }
-    }
-
-    for (const key of Object.keys(signedBy)) {
-      if (signedBy[key]) {
-        sigs += 1;
+      // Preserve Core's ordinary key-ID counting, including distinct compressed
+      // and uncompressed addresses. Repeated signatures still count only once.
+      const signedKeys = new Set<string>();
+      for (const signer of signers) {
+        for (const keyID of signer.keyIDs) {
+          if (primaryKeys.has(keyID)) signedKeys.add(keyID);
+        }
       }
 
-      if (sigs == minsigs) return true;
+      return signedKeys.size >= minimumSignatures;
+    } catch {
+      return false;
     }
-
-    return false;
   }
 
   async getSignatureInfo(
@@ -533,25 +561,7 @@ class VerusIdInterface {
     hashtype: number;
     height: number;
   }> {
-    let iAddress;
-    let chainId;
-
-    try {
-      address.fromBase58Check(iAddrOrIdentity);
-      iAddress = iAddrOrIdentity;
-    } catch (e) {
-      const _idres = await this.interface.getIdentity(iAddrOrIdentity);
-      if (_idres.error) throw new Error(_idres.error.message);
-      const identity = _idres.result!;
-      iAddress = identity.identity.identityaddress!;
-    }
-
-    if (chainIAddr != null) chainId = chainIAddr;
-    else chainId = await this.getChainId();
-
-    const sig = new IdentitySignature(networks.verus);
-
-    sig.fromBuffer(Buffer.from(base64Sig, "base64"), 0, chainId, iAddress);
+    const sig = await this.readIdentitySignature(iAddrOrIdentity, base64Sig, chainIAddr);
 
     return {
       version: sig.version,
@@ -633,37 +643,19 @@ class VerusIdInterface {
     chainIAddr?: string,
     sigBlockTime?: number
   ): Promise<boolean> {
-    const sigInfo = await this.getSignatureInfo(
+    const signature = await this.readIdentitySignature(
       request.signing_id,
       request.signature!.signature,
       chainIAddr
     );
 
-    let blocktime;
+    if (!await this.verifySignatureCreationTime(request.challenge.created_at, signature.blockHeight, sigBlockTime)) return false;
 
-    if (sigBlockTime) blocktime = sigBlockTime;
-    else {
-      const _blockres = await this.interface.getBlock(sigInfo.height.toString());
-      if (_blockres.error) throw new Error(_blockres.error.message);
-
-      blocktime = (_blockres.result as BlockInfo).time;
-    }
-
-    if (
-      BigNumber(blocktime)
-        .minus(request.challenge.created_at)
-        .abs()
-        .isGreaterThan(LOGIN_CONSENT_SIG_TIME_DIFF_THRESHOLD)
-    ) {
-      return false
-    }
-
-    return this.verifyHash(
+    return this.verifyHashOrMessage(
       request.signing_id,
-      request.signature!.signature,
-      request.getChallengeHash(sigInfo.height),
-      getIdentityResult,
-      chainIAddr
+      signature,
+      request.getChallengeHash(signature.blockHeight),
+      getIdentityResult
     );
   }
 
@@ -1063,7 +1055,7 @@ class VerusIdInterface {
     const sig = new IdentitySignature(
       networks.verus,
       ID_SIG_VERSION,
-      ID_SIG_TYPE,
+      EHashTypes.HASH_SHA256,
       null,
       [Buffer.from(request.signature!.signature, "base64")]
     );
@@ -1151,7 +1143,7 @@ class VerusIdInterface {
     }
   }
 
-  private static getSatoshis(value: string | number, label: string): BNValue {
+  private static getSatoshis(value: string | number, label: string): BN {
     const satoshis = BigNumber(value);
 
     if (!satoshis.isFinite() || satoshis.isNegative() || !satoshis.isInteger()) {
@@ -1161,8 +1153,8 @@ class VerusIdInterface {
     return new BN(satoshis.toFixed(0), 10);
   }
 
-  private static getCurrencyValueMap(output: CurrencyTransferOutput): Map<string, BNValue> {
-    const valueMap = new Map<string, BNValue>();
+  private static getCurrencyValueMap(output: CurrencyTransferOutput): Map<string, BN> {
+    const valueMap = new Map<string, BN>();
 
     for (const currency of Object.keys(output.currencies || {})) {
       valueMap.set(currency, VerusIdInterface.getSatoshis(output.currencies[currency], "Currency transfer output currency value for " + currency));
@@ -1194,7 +1186,7 @@ class VerusIdInterface {
     } else throw new Error("Unsupported transfer destination type.");
   }
 
-  private static getTokenOutputVersion(valueMap: Map<string, BNValue>): BNValue {
+  private static getTokenOutputVersion(valueMap: Map<string, BN>): BN {
     const version = new BN(1, 10);
 
     return valueMap.size > 1 ? version.xor(TOKEN_OUTPUT_VERSION_MULTIVALUE) : version;
@@ -1202,17 +1194,6 @@ class VerusIdInterface {
 
   private static createSmartTransactionOutputScript(master: OptCCParams, params: OptCCParams): Buffer {
     return new SmartTransactionScript(master, params).toBuffer();
-  }
-
-  private static cloneTransferDestination(destination: TransferDestination): TransferDestination {
-    return new TransferDestination({
-      type: destination.type,
-      destinationBytes: Buffer.from(destination.destinationBytes),
-      gatewayID: destination.gatewayID,
-      gatewayCode: destination.gatewayCode,
-      fees: destination.fees,
-      auxDests: (destination.auxDests || []).map(auxDest => VerusIdInterface.cloneTransferDestination(auxDest))
-    });
   }
 
   private static usesRefundDestination(output: CurrencyTransferOutput): boolean {
@@ -1227,13 +1208,13 @@ class VerusIdInterface {
   }
 
   private static getReserveTransferDestination(output: CurrencyTransferOutput): TransferDestination {
-    const destination = VerusIdInterface.cloneTransferDestination(output.address);
+    const destination = snapshotRequestValue(output.address);
 
     if (output.refundto != null && VerusIdInterface.usesRefundDestination(output)) {
       destination.type = destination.type.or(FLAG_DEST_AUX);
       destination.auxDests = [
         ...(destination.auxDests || []),
-        VerusIdInterface.cloneTransferDestination(output.refundto)
+        snapshotRequestValue(output.refundto)
       ];
     }
 
@@ -1300,7 +1281,7 @@ class VerusIdInterface {
     }
   }
 
-  private static getReserveTransferFlags(output: CurrencyTransferOutput, currencies: string[]): BNValue {
+  private static getReserveTransferFlags(output: CurrencyTransferOutput, currencies: string[]): BN {
     let flags = new BN(1, 10);
     const isConversion = output.convertto != null && (currencies.length !== 1 || output.convertto !== currencies[0]);
 
@@ -1316,7 +1297,7 @@ class VerusIdInterface {
     return flags;
   }
 
-  private static calculateReserveTransferFee(destination: TransferDestination, flags: BNValue): BNValue {
+  private static calculateReserveTransferFee(destination: TransferDestination, flags: BN): BN {
     if (flags.and(RESERVE_TRANSFER_FEE_OUTPUT).gt(new BN(0, 10))) return new BN(0, 10);
 
     const baseFee = RESERVE_TRANSFER_DEFAULT_PER_STEP_FEE.shln(1);
@@ -1325,7 +1306,7 @@ class VerusIdInterface {
     return baseFee.add(baseFee.mul(new BN(destinationSizeSteps, 10)));
   }
 
-  private static getReserveTransferFeeSatoshis(output: CurrencyTransferOutput, flags: BNValue): BNValue {
+  private static getReserveTransferFeeSatoshis(output: CurrencyTransferOutput, flags: BN): BN {
     return output.feesatoshis != null ?
       VerusIdInterface.getSatoshis(output.feesatoshis, "Reserve transfer fee") :
       VerusIdInterface.calculateReserveTransferFee(output.address, flags);
@@ -1341,7 +1322,7 @@ class VerusIdInterface {
     return destination.isGateway() && destination.gatewayID != null;
   }
 
-  private static getGatewayLegFees(destination: TransferDestination): BNValue {
+  private static getGatewayLegFees(destination: TransferDestination): BN {
     return VerusIdInterface.hasGatewayLeg(destination) ?
       VerusIdInterface.getSatoshis(destination.fees ? destination.fees.toString() : 0, "Reserve transfer gateway fee") :
       new BN(0, 10);
@@ -1360,7 +1341,7 @@ class VerusIdInterface {
 
     for (const output of currencyTransferOutputs) {
       const tagDestination = output.vdxftag == null ? undefined : new TxDestination(
-        new UnknownID(decodeDestination(output.vdxftag, VDXF_TAG_ADDRESS_VERSION)),
+        new UnknownID(decodeDestination(output.vdxftag, X_ADDR_VERSION)),
         TxDestination.TYPE_INDEX
       );
       if (output.address == null) throw new Error("Must specify address for all outputs");
@@ -1847,7 +1828,7 @@ class VerusIdInterface {
     chainIAddr?: string
   ): Promise<PreparedIdentityUpdateTransaction> {
     // Detach caller-owned state before invoking RPC or wallet callbacks.
-    identity = snapshotUpdateRequestValue(identity);
+    identity = snapshotRequestValue(identity);
     localUploadCrypto = captureLocalIdentityUploadCrypto(localUploadCrypto);
     decryptData = decryptData || localUploadCrypto?.decryptData;
 
@@ -2073,7 +2054,7 @@ class VerusIdInterface {
         unfundedTxHex = updateIdentityTransactionHex;
       } else {
         const constructedIdentity =
-          snapshotUpdateRequestValue(expectedIdentity);
+          snapshotRequestValue(expectedIdentity);
         const evidence = identity.containsSignData()
           ? await buildLocalIdentityUpdateData({
               request: identity,
@@ -2119,7 +2100,7 @@ class VerusIdInterface {
 
       // Remove upload entries from this comparison copy so ordinary fields can
       // be checked separately. Verify uploads against the original request below.
-      const ordinary = snapshotUpdateRequestValue(identityOnOutput);
+      const ordinary = snapshotRequestValue(identityOnOutput);
 
       if (identity.containsSignData()) {
         for (const [key] of identity.signDataMap!.entries()) {
@@ -2233,8 +2214,8 @@ class VerusIdInterface {
   ): Promise<IdentityUpdateTransactionResult> {
     assertUnverifiedPrevoutsAllowed(allowUnverifiedPrevouts);
     if (maxFee !== undefined) identityUpdateFeeCap(maxFee);
-    const utxos = utxoList == null ? undefined : snapshotUpdateRequestValue(getUtxos(utxoList));
-    fundRawTransactionResult = snapshotUpdateRequestValue(fundRawTransactionResult);
+    const utxos = utxoList == null ? undefined : snapshotRequestValue(getUtxos(utxoList));
+    fundRawTransactionResult = snapshotRequestValue(fundRawTransactionResult);
     const preparedIdentityUpdate = await this.prepareIdentityUpdateTransaction(
       identity,
       rawIdentityTransaction,
@@ -2344,11 +2325,11 @@ class VerusIdInterface {
     options: IdentityUpdateCurrencyTransferOptions = {}
   ): Promise<IdentityUpdateTransactionResult> {
     const localUploadCrypto = captureLocalIdentityUploadCrypto(options.localUploadCrypto);
-    options = { ...snapshotUpdateRequestValue({ ...options, localUploadCrypto: undefined }), localUploadCrypto };
-    currencyTransferOutputs = snapshotUpdateRequestValue(currencyTransferOutputs);
+    options = { ...snapshotRequestValue({ ...options, localUploadCrypto: undefined }), localUploadCrypto };
+    currencyTransferOutputs = snapshotRequestValue(currencyTransferOutputs);
     assertUnverifiedPrevoutsAllowed(options.allowUnverifiedPrevouts ?? false);
     if (options.maxFee !== undefined) identityUpdateFeeCap(options.maxFee);
-    const utxos = snapshotUpdateRequestValue(getUtxos(utxoList));
+    const utxos = snapshotRequestValue(getUtxos(utxoList));
     if (!currencyTransferOutputs.length) throw new Error("Must provide at least one explicit currency transfer output.");
 
     // Retain the caller's approved ownership policy before any RPC await. A
@@ -2507,7 +2488,7 @@ class VerusIdInterface {
     allowUnverifiedPrevouts: boolean = false
   ): Promise<IdentityUpdateTransactionResult> {
     assertUnverifiedPrevoutsAllowed(allowUnverifiedPrevouts);
-    const identity = snapshotUpdateRequestValue(_identity);
+    const identity = snapshotRequestValue(_identity);
 
     identity.clearContentMultiMap();
     identity.revoke();
@@ -2542,7 +2523,7 @@ class VerusIdInterface {
     allowUnverifiedPrevouts: boolean = false
   ): Promise<IdentityUpdateTransactionResult> {
     assertUnverifiedPrevoutsAllowed(allowUnverifiedPrevouts);
-    const identity = snapshotUpdateRequestValue(_identity);
+    const identity = snapshotRequestValue(_identity);
 
     identity.clearContentMultiMap();
     identity.unrevoke();
@@ -2603,18 +2584,13 @@ class VerusIdInterface {
   }
 
   private async createGenericEnvelope<T extends GenericEnvelope, I>(
-    EnvelopeClass: new (params: (I)) => T,
+    EnvelopeClass: new (params: I) => T,
     params: I,
     primaryAddrWif?: string,
     getIdentityResult?: GetIdentityResponse["result"],
-    currentHeight?: number,
-    chainIAddr?: string
+    currentHeight?: number
   ): Promise<T> {
-    let chainId: string;
-
-    if (chainIAddr != null) chainId = chainIAddr;
-    else chainId = await this.getChainId();
-
+    // Signing uses the system carried in the envelope.
     const req = new EnvelopeClass(params)
 
     if (primaryAddrWif) {
@@ -2673,51 +2649,92 @@ class VerusIdInterface {
 
     const verifiableSig = envelope.signature!;
 
-    const sigInfo = await this.getSignatureInfo(
+    const signature = await this.readIdentitySignature(
       verifiableSig.identityID.toIAddress()!,
       verifiableSig.signatureAsVch!.toString('base64'),
       chainIAddr
     );
 
-    if (envelope.hasCreatedAt()) {
-      let blocktime;
-
-      if (sigBlockTime) blocktime = sigBlockTime;
-      else {
-        const _blockres = await this.interface.getBlock(sigInfo.height.toString());
-        if (_blockres.error) throw new Error(_blockres.error.message);
-
-        blocktime = (_blockres.result as BlockInfo).time;
-      }
-
-      if (
-        BigNumber(blocktime)
-          .minus(envelope.createdAt?.toString()!)
-          .abs()
-          .isGreaterThan(LOGIN_CONSENT_SIG_TIME_DIFF_THRESHOLD)
-      ) {
-        return false
-      }
-    } else {
-      return false
+    if (!await this.verifySignatureCreationTime(
+      envelope.hasCreatedAt() ? envelope.createdAt : undefined, signature.blockHeight, sigBlockTime
+    )) {
+      return false;
     }
-    
-    return this.verifyHash(
+
+    return this.verifyHashOrMessage(
       verifiableSig.identityID.toIAddress(),
-      verifiableSig.signatureAsVch.toString('base64'),
-      envelope.getDetailsIdentitySignatureHash(sigInfo.height),
-      getIdentityResult,
-      chainIAddr
+      signature,
+      envelope.getDetailsIdentitySignatureHash(signature.blockHeight),
+      getIdentityResult
     );
   }
 
+  /** A shared signed-block time check; current request expiry is a separate policy. */
+  private async verifySignatureCreationTime(
+    createdAt: number | BN | undefined,
+    signedHeight: number,
+    sigBlockTime?: number
+  ): Promise<boolean> {
+    const timestamp = new BigNumber(createdAt?.toString() ?? NaN);
+
+    if (!timestamp.isInteger() || timestamp.isNegative() || timestamp.gt(Number.MAX_SAFE_INTEGER)) return false;
+
+    let blocktime = sigBlockTime;
+
+    if (blocktime == null) {
+      const response = await this.interface.getBlock(signedHeight.toString());
+      if (response.error) throw new Error(response.error.message);
+
+      blocktime = (response.result as BlockInfo).time;
+    }
+
+    return Number.isSafeInteger(blocktime) && blocktime >= 0 &&
+      timestamp.minus(blocktime).abs().lte(IDENTITY_SIGNATURE_TIME_TOLERANCE_SECONDS);
+  }
+
+  /** Fresh RPC authority evidence, scoped to this connection's signing system. */
+  private async loadAuthorizationSignatureContext(
+    envelope: GenericEnvelope,
+    sigBlockTime?: number,
+    allowEncryptedDetails = false
+  ) {
+    validateAppAuthorizationEnvelope(envelope, true, allowEncryptedDetails);
+
+    const metadata = envelope.signature!;
+    const source = { rpc: this.interface, systemID: await this.getChainId() };
+    const delegate: AppAuthorizationIdentity = {
+      identityID: metadata.identityID.toIAddress(),
+      systemID: metadata.systemID.toIAddress(),
+    };
+
+    if (delegate.systemID !== source.systemID) return undefined;
+
+    const signature = await this.getSignatureInfo(
+      delegate.identityID,
+      metadata.signatureAsVch.toString("base64"),
+      delegate.systemID
+    );
+    const [signedIdentity, currentIdentity] = await Promise.all([
+      loadIdentityRevision(source, delegate, signature.height),
+      loadIdentityRevision(source, delegate),
+    ]);
+
+    if (!await this.verifySignatureCreationTime(envelope.createdAt, signature.height, sigBlockTime) ||
+        !inspectAuthorizationSigners(envelope, signedIdentity, currentIdentity).valid) {
+      return undefined;
+    }
+
+    return { source, delegate, signedIdentity, currentIdentity };
+  }
+
+  // Keep the legacy chainIAddr arguments at the public API boundary.
   createGenericRequest = (
     params: GenericRequestInterface,
     primaryAddrWif?: string,
     getIdentityResult?: GetIdentityResponse["result"],
     currentHeight?: number,
     chainIAddr?: string
-  ) => this.createGenericEnvelope<GenericRequest, GenericRequestInterface>(GenericRequest, params, primaryAddrWif, getIdentityResult, currentHeight, chainIAddr);
+  ) => this.createGenericEnvelope<GenericRequest, GenericRequestInterface>(GenericRequest, params, primaryAddrWif, getIdentityResult, currentHeight);
 
   createGenericResponse = (
     params: GenericResponseInterface,
@@ -2725,7 +2742,7 @@ class VerusIdInterface {
     getIdentityResult?: GetIdentityResponse["result"],
     currentHeight?: number,
     chainIAddr?: string
-  ) => this.createGenericEnvelope<GenericResponse, GenericResponseInterface>(GenericResponse, params, primaryAddrWif, getIdentityResult, currentHeight, chainIAddr);
+  ) => this.createGenericEnvelope<GenericResponse, GenericResponseInterface>(GenericResponse, params, primaryAddrWif, getIdentityResult, currentHeight);
 
   signGenericRequest = this.signGenericEnvelope<GenericRequest>;
   signGenericResponse = this.signGenericEnvelope<GenericResponse>;
@@ -2734,6 +2751,17 @@ class VerusIdInterface {
     const details = request.details;
 
     if (!Array.isArray(details)) return false;
+
+    // Authorization is a distinct bootstrap operation. The legacy method name
+    // must not let acceptUnsigned or unrelated detail types bypass admission.
+    if (hasAppAuthorizationRequest(request)) {
+      try {
+        validateAppAuthorizationRequest(request);
+        return true;
+      } catch {
+        return false;
+      }
+    }
 
     let authIndex = -1;
     let specialIndex = -1;
@@ -2779,6 +2807,10 @@ class VerusIdInterface {
     return true;
   }
 
+  /**
+   * Verify request admission; authorization bootstrap also checks current app
+   * policy and throws UnsupportedDelegatorProfileError for a reserved profile.
+   */
   verifyGenericRequest = async (
     envelope: GenericRequest,
     getIdentityResult?: GetIdentityResponse["result"],
@@ -2787,6 +2819,32 @@ class VerusIdInterface {
     acceptUnsigned = false
   ): Promise<boolean> => {
     if (!VerusIdInterface.validateUnsignedGenericRequest(envelope)) return false;
+
+    if (hasAppAuthorizationRequest(envelope)) {
+      const request = snapshotRequestValue(envelope);
+      const rpc = this.interface;
+      const configuredChain = rpc.chain;
+
+      try {
+        const context = await this.loadAuthorizationSignatureContext(request, sigBlockTime);
+
+        if (!context || (chainIAddr != null && chainIAddr !== context.delegate.systemID)) return false;
+
+        // A future profile must not be bypassed by an older authorization flow.
+        // Inspect effective current content, not the request's signing-height CMM.
+        await assertAppDelegatorProfileSupportedV1(context.source, {
+          systemID: context.delegate.systemID,
+          identityID: request.appOrDelegatorID!.toIAddress(),
+        });
+        validateAppAuthorizationRequest(request);
+
+        return this.interface === rpc && rpc.chain === configuredChain &&
+          envelope.toBuffer().equals(request.toBuffer());
+      } catch (error) {
+        if (error instanceof UnsupportedDelegatorProfileError) throw error;
+        return false;
+      }
+    }
 
     if (acceptUnsigned && !envelope.isSigned()) {
       return true;
@@ -2799,6 +2857,181 @@ class VerusIdInterface {
       sigBlockTime
     );
   };
+
+  /**
+   * Shared admission for any delegated handler. Supply a complete effective
+   * credential view and current wallet-control checks, then retain the handler's
+   * own approval and response-encryption requirements. No failed grant falls
+   * back to self-controlled or unscoped processing. A present delegator profile
+   * throws UnsupportedDelegatorProfileError so the wallet can explain rejection.
+   */
+  async verifyDelegatedGenericRequest(
+    envelope: GenericRequest,
+    options: VerifyDelegatedGenericRequestOptions
+  ): Promise<boolean> {
+    const request = snapshotRequestValue(envelope);
+    const retained = snapshotRequestValue(options);
+    const rpc = this.interface;
+    const configuredChain = rpc.chain;
+
+    try {
+      if (hasAppAuthorizationRequest(request) || !request.hasAppOrDelegatorID() ||
+          !VerusIdInterface.validateUnsignedGenericRequest(request)) return false;
+
+      const authentication = request.details.find(
+        detail => detail instanceof AuthenticationRequestOrdinalVDXFObject
+      ) as AuthenticationRequestOrdinalVDXFObject | undefined;
+
+      // A historical signing block alone says nothing about freshness today.
+      // Other request types must supply their own signed freshness contract.
+      const isUnexpired = () => {
+        if (!authentication) return typeof retained.verifyFreshness === "function";
+
+        validateAuthenticationExpiry(authentication.data);
+        return true;
+      };
+
+      if (!isUnexpired()) return false;
+
+      const context = await this.loadAuthorizationSignatureContext(request, retained.sigBlockTime);
+      if (!context) return false;
+
+      const grant = await verifyDelegatedAppAuthorization({
+        ...retained,
+        delegate: context.delegate,
+        appID: request.appOrDelegatorID!.toIAddress(),
+        verifyDelegatorProfile: async delegator => {
+          // The profile read follows every asynchronous handler freshness check,
+          // so a profile introduced during that check cannot be overlooked.
+          if (retained.verifyFreshness &&
+              await retained.verifyFreshness(snapshotRequestValue(request)) !== true) {
+            throw new Error("Delegated request freshness check failed.");
+          }
+
+          await assertAppDelegatorProfileSupportedV1(context.source, delegator);
+        },
+        verifyAuthority: async credential => {
+          const original = await loadIdentityRevisionAtOutpoint(
+            context.source, context.delegate, credential.data.originalRevision
+          );
+
+          return inspectAuthorizationSigners(
+            request, context.signedIdentity, context.currentIdentity, original
+          ).valid;
+        },
+      });
+
+      if (grant == null) return false;
+
+      return isUnexpired() && this.interface === rpc &&
+        rpc.chain === configuredChain && envelope.toBuffer().equals(request.toBuffer()) &&
+        options.user.identityID === retained.user.identityID &&
+        options.user.systemID === retained.user.systemID;
+    } catch (error) {
+      if (error instanceof UnsupportedDelegatorProfileError) throw error;
+      return false;
+    }
+  }
+
+  /**
+   * Verify a completion against the retained request and the resolved final user.
+   * For encrypted details, decryptDetails authenticates a detached descriptor and
+   * returns raw plaintext: the single VDXF-tagged DataDescriptor used by the
+   * wallet's response encryption. Its objectdata contains the original details
+   * bytes. Private keys stay in the callback; the SDK unwraps and validates data.
+   */
+  async verifyAppAuthorizationResponse(
+    response: GenericResponse,
+    request: GenericRequest,
+    user: AppAuthorizationResponseUser,
+    sigBlockTime?: number,
+    decryptDetails?: (descriptor: DataDescriptor) => Buffer | Promise<Buffer>
+  ): Promise<boolean> {
+    const retainedResponse = snapshotRequestValue(response);
+    const retainedRequest = snapshotRequestValue(request);
+    const retainedUser = snapshotRequestValue(user);
+    const rpc = this.interface;
+    const configuredChain = rpc.chain;
+
+    try {
+      const encrypted = retainedResponse.detailsAreEncrypted();
+      if (encrypted && typeof decryptDetails !== "function") return false;
+
+      const context = await this.loadAuthorizationSignatureContext(
+        retainedResponse, sigBlockTime, encrypted
+      );
+      if (!context) return false;
+
+      // Do not invoke private decryption for a response from an unexpected user.
+      if (context.delegate.identityID !== retainedUser.identityID ||
+          context.delegate.systemID !== retainedUser.systemID) return false;
+
+      let readableResponse = retainedResponse;
+      let currentIdentity = context.currentIdentity;
+
+      if (encrypted) {
+        const descriptor = (
+          retainedResponse.details[0] as DataDescriptorOrdinalVDXFObject
+        ).data;
+        const decryptedBytes = await decryptDetails!(snapshotRequestValue(descriptor));
+
+        // Authenticated encryption adds overhead. Bound parsing by the original
+        // ciphertext rather than trusting an arbitrarily large callback result.
+        if (!Buffer.isBuffer(decryptedBytes) || !decryptedBytes.length ||
+            decryptedBytes.length > descriptor.objectdata.length) return false;
+
+        // Parsed buffers may share slices; detach before the later authority RPC.
+        const plaintext = Buffer.from(decryptedBytes);
+
+        // Reuse the wallet's existing single-descriptor VDXF framing. Consume
+        // all bytes and reject flags/encodings that serialization would repair.
+        const decoded = new VDXFDataDescriptor();
+        if (decoded.fromBuffer(plaintext) !== plaintext.length ||
+            decoded.vdxfkey !== DataDescriptorKey.vdxfid ||
+            !decoded.version.eq(VDXF_OBJECT_DEFAULT_VERSION) ||
+            !decoded.dataDescriptor.isValid() ||
+            !decoded.dataDescriptor.flags.eq(decoded.dataDescriptor.calcFlags()) ||
+            decoded.dataDescriptor.hasEncryptedData() ||
+            !decoded.toBuffer().equals(plaintext)) return false;
+
+        const details = decoded.dataDescriptor.objectdata;
+        readableResponse = snapshotRequestValue(retainedResponse);
+        readableResponse.flags = readableResponse.flags.xor(
+          GenericResponse.FLAG_DETAILS_ARE_ENCRYPTED
+        );
+
+        // Keep the authenticated metadata and MULTI_DETAILS flag. The signature
+        // belongs to retainedResponse; never verify it against this plaintext view.
+        if (readableResponse.setDetailsFromBuffer(details) !== details.length ||
+            !readableResponse.getDetailsBuffer().equals(details)) return false;
+
+        // Decryption may await wallet work. Refresh U's authority and parent
+        // before accepting, still checking signers against the signed ciphertext.
+        currentIdentity = await loadIdentityRevision(context.source, context.delegate);
+        if (!inspectAuthorizationSigners(
+          retainedResponse, context.signedIdentity, currentIdentity
+        ).valid) return false;
+      }
+
+      // Parent constraints use RPC state rather than a caller-supplied label.
+      validateAppAuthorizationResponse(readableResponse, retainedRequest, {
+        ...retainedUser,
+        parentID: currentIdentity.identity.parent,
+      });
+
+      // Revalidate before serialization so callback-time descriptor mutations
+      // cannot disappear through the descriptor codec's flag normalization.
+      validateAppAuthorizationEnvelope(response, true, encrypted);
+
+      return this.interface === rpc && rpc.chain === configuredChain &&
+        response.toBuffer().equals(retainedResponse.toBuffer()) &&
+        request.toBuffer().equals(retainedRequest.toBuffer()) &&
+        user.identityID === retainedUser.identityID && user.systemID === retainedUser.systemID;
+    } catch {
+      return false;
+    }
+  }
+
   verifyGenericResponse = this.verifyGenericEnvelope<GenericResponse>;
 }
 

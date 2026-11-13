@@ -1,4 +1,5 @@
 import BN from "bn.js";
+import { snapshotRequestValue } from "../utils/requestSnapshot";
 import { verifyIdentityRegistrationFunding } from "./registrationFundingVerification";
 import { isIdentityLockedAtHeight } from "./identityLocks";
 import {
@@ -184,20 +185,6 @@ export interface CreateIdentityRegistrationTransactionRequest {
   /** Previously paid commitment fee, for the combined operation quote. */
   commitmentFee?: string;
   offer?: string;
-}
-
-/** Copy wallet inputs before RPC awaits so form edits cannot alter approval. */
-function snapshotNameReservationRequest(
-  request: CreateNameReservationTransactionRequest
-): CreateNameReservationTransactionRequest {
-  return {
-    ...request,
-    salt: Buffer.isBuffer(request.salt)
-      ? Buffer.from(request.salt)
-      : request.salt,
-    funding: request.funding.map((input) => ({ ...input })),
-    approvedCosts: { ...request.approvedCosts },
-  };
 }
 
 /** Detach the reveal request while preserving and validating typed identity data. */
@@ -1012,7 +999,7 @@ export async function createNameReservationTransaction(
   rpc: RegistrationRpc,
   request: CreateNameReservationTransactionRequest
 ): Promise<NameReservationTransactionResult> {
-  request = snapshotNameReservationRequest(request);
+  request = snapshotRequestValue(request);
   rpc = createRegistrationRpc(rpc);
   const controller = destination(request.controller);
 
